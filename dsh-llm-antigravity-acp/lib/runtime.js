@@ -160,7 +160,15 @@ export class AntigravityRuntime {
     }
     /** Provider-level model allowlist; empty offers every advertised family. */
     providerVisible() {
-        return [...(this.overrides.visibleModels ?? current(this.host.config.visibleModels) ?? [])];
+        // Normalized on every read: a hand-edited or older stored profile can carry
+        // blank or padded ids, and an empty result would hide every family.
+        const out = [];
+        for (const raw of this.overrides.visibleModels ?? current(this.host.config.visibleModels) ?? []) {
+            const id = raw.trim();
+            if (id.length > 0 && !out.includes(id))
+                out.push(id);
+        }
+        return out;
     }
     /** Only the system account and provider allowlist can serve a model. */
     servesModel(accountId, model) {

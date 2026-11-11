@@ -264,7 +264,14 @@ export class AntigravityRuntime {
 
   /** Provider-level model allowlist; empty offers every advertised family. */
   providerVisible(): string[] {
-    return [...(this.overrides.visibleModels ?? current(this.host.config.visibleModels) ?? [])]
+    // Normalized on every read: a hand-edited or older stored profile can carry
+    // blank or padded ids, and an empty result would hide every family.
+    const out: string[] = []
+    for (const raw of this.overrides.visibleModels ?? current(this.host.config.visibleModels) ?? []) {
+      const id = raw.trim()
+      if (id.length > 0 && !out.includes(id)) out.push(id)
+    }
+    return out
   }
 
   /** Only the system account and provider allowlist can serve a model. */
@@ -439,8 +446,6 @@ export class AntigravityRuntime {
     slot.usage.totalTokens += Math.max(0, Math.round(usage.totalTokens ?? input + output))
   }
 
-
-
   /** Stream on the sole system account; the harness owns finite retries. */
   async * stream(options: GenerateOptions): AsyncGenerator<StreamChunk> {
     if (options.signal?.aborted === true) {
@@ -531,10 +536,6 @@ export class AntigravityRuntime {
     const switched = await this.select(conv, proc, options.model, effort)
     const settleMs = this.host.config.coldSwitchSettleMs ?? 80
     if ((freshSession || resumedFromDisk) && switched && settleMs > 0) {
-
-
-
-
       await new Promise<void>(resolve => setTimeout(resolve, settleMs))
     }
     const replayBudget = slot.preflight?.unlock.status === 'unlocked'

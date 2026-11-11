@@ -498,6 +498,16 @@ test('every endpoint-advertised family including Sonnet and GPT-OSS appears in t
   assert.equal(gpt.context.contextWindow, 131_072)
 })
 
+test('provider allowlists are normalized so blank or padded ids never hide every model', async () => {
+  const { adapter, runtime } = makeRuntime({ config: { visibleModels: [' gemini-3.8-flash ', '', 'gemini-3.8-flash'] } })
+  await runtime.warmup()
+  assert.deepEqual([...runtime.providerVisible()], ['gemini-3.8-flash'], 'trimmed, deduplicated, blanks dropped')
+  assert.deepEqual((await adapter.listModels('antigravity')).map(m => m.id), ['gemini-3.8-flash'])
+  const blankOnly = makeRuntime({ config: { visibleModels: [''] } })
+  await blankOnly.runtime.warmup()
+  assert.equal((await blankOnly.adapter.listModels('antigravity')).length, 5, 'an allowlist of only blanks restricts nothing')
+})
+
 test('Claude honors the requested thinking level', async () => {
   const { adapter, prompts } = makeRuntime()
   const chunks = await collect(adapter.stream({ provider: 'antigravity', model: 'claude-opus-5-5', reasoningEffort: 'high', sessionId: 'S14', messages: [sys, user('u1', 'hello')] }))

@@ -171,8 +171,14 @@ export class ModelCatalog {
             if (offered.length > 0)
                 this.efforts = EFFORTS.filter(e => offered.includes(e));
         }
-        const advertised = modelOption?.options?.map(o => ({ id: o.value, name: o.name ?? o.value }))
-            ?? available?.map(o => ({ id: o.modelId, name: o.name ?? o.modelId }));
+        const fromOptions = modelOption?.options?.map(o => ({ id: o.value, name: o.name ?? o.value }));
+        const fromAvailable = available?.map(o => ({ id: o.modelId, name: o.name ?? o.modelId }));
+        // An empty list is not a claim that the CLI offers nothing: it is a session
+        // that reported no inventory this round. Falling through keeps the last
+        // observed catalog instead of blanking the picker.
+        const advertised = fromOptions !== undefined && fromOptions.length > 0
+            ? fromOptions
+            : fromAvailable !== undefined && fromAvailable.length > 0 ? fromAvailable : undefined;
         if (advertised === undefined)
             return false;
         this.observed = true;

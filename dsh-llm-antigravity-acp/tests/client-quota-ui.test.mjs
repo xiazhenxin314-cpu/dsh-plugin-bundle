@@ -691,6 +691,34 @@ test('settings.models.provider-card stays collapsed when open is false and expan
   assert.equal(statusCalls, 1)
   expanded.unmount()
 })
+
+test('the seat passes no open prop, so the Models page card stays collapsed', async () => {
+  let statusCalls = 0
+  const { registered, mount } = loadClientPlugin({
+    language: 'zh-CN',
+    remoteService: {
+      status: async () => {
+        statusCalls += 1
+        return catalogStatus([])
+      },
+    },
+  })
+  const slot = registered.get('settings.models.provider-card')
+  await flush()
+  statusCalls = 0
+  // The host's real owner props for this seat: provider/configured/keyConfigured
+  // and no `open` key at all. A missing prop must read as collapsed.
+  const view = mount(slot.Component, {
+    ...slot.meta.inject(),
+    provider: { provider: 'antigravity', displayName: 'Antigravity', settingsNs: 'llm-antigravity-acp', settingsPath: [] },
+    configured: true,
+    keyConfigured: false,
+  })
+  await flush()
+  assert.equal(view.tree, null, 'an absent open prop keeps the provider row collapsed')
+  assert.equal(statusCalls, 0, 'a collapsed provider row never calls status')
+  view.unmount()
+})
 test('registers only settings and model controls, without quota or account services', async () => {
   const forbiddenCalls = []
   const remoteService = Object.fromEntries(['quota', 'accounts', 'login', 'loginCode', 'cancelLogin'].map((method) => [method, () => { forbiddenCalls.push(method); throw new Error('Unexpected ' + method) }]))

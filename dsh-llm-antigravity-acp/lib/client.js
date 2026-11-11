@@ -202,8 +202,11 @@ function createModelSelection(deps) {
     const isCompact = props.compact === true
     const isDraftControlled = Array.isArray(props.draftIds) && typeof props.onDraftChange === 'function'
     // On the Models settings page (`settings.models.provider-card`), stay
-    // collapsed like DeepSeek / AxonHub until the user clicks Edit (`open === true`).
-    const collapsedOnModelsPage = props.provider !== undefined && props.open === false
+    // collapsed like every other provider row until the host says the row is
+    // being edited. The seat's owner props are only
+    // `provider/configured/keyConfigured`, so a missing `open` means
+    // collapsed — an absent prop must not read as "expand".
+    const collapsedOnModelsPage = props.provider !== undefined && props.open !== true
 
     const publishStatus = (next) => {
       setStatus(next)

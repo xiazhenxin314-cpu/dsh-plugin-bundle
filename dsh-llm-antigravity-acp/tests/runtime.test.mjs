@@ -2,7 +2,7 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -13,7 +13,7 @@ import { AntigravityAdapter } from '../lib/adapter.js'
 import { Config } from '../lib/config.js'
 import { classifyAgentNotice, toTokenUsage } from '../lib/conversation.js'
 import { EMPTY_INPUT_CONTINUATION, LOCKED_REPLAY_BUDGET_BYTES } from '../lib/history.js'
-import { assertSupportedAgyVersion, checkUnlock, prepareHome, resolveAgyBinary, resolvePythonArgv, syncOAuthToken } from '../lib/preflight.js'
+import { assertSupportedAgyVersion, checkUnlock, prepareHome, resolveAgyBinary, resolvePythonArgv } from '../lib/preflight.js'
 import { AntigravityRemote, INVOCATIONS } from '../lib/remote.js'
 import {
   decodeGenMetadata, decodeStepMetadata,
@@ -33,10 +33,10 @@ function makeRuntime(extra = {}) {
   const config = {
     provider: 'antigravity', displayName: 'Antigravity', command: fake, home,
     // The machine account is an ordinary list entry that reuses this Mac's login.
-    accounts: [{ id: 'default', displayName: '', home: '', enabled: true, env: {}, contextWindow: 0, system: true, visibleModels: [], priority: 1, weight: 1 }],
+    accountLabel: '', visibleModels: [],
     contextWindow: 0, defaultEffort: 'high', autoPatch: false, patchScript: join(home, 'missing.py'),
     maxLiveSessions: 16, idleSessionTtlMs: 600_000, parkSettleMs: 80, keepAliveMs: 1_000,
-    longDecodeContinuations: 3, warmup: false, quotaTtlMs: 60_000, ...extra.config,
+    longDecodeContinuations: 3, warmup: false, ...extra.config,
   }
   const runtime = new AntigravityRuntime({
     config,
@@ -105,8 +105,7 @@ test('resolveModel declares the context window, three efforts, and in-history sy
   assert.deepEqual(info.reasoning.efforts.map(e => e.id), ['low', 'medium', 'high'])
   assert.equal(info.reasoning.defaultEffort, 'medium')
   assert.equal(info.systemPromptUpdate, 'in-history')
-  const listed = await adapter.listModels('antigravity')
-  assert.deepEqual(listed.map(m => m.id), ['gemini-4-argon', 'gemini-3.8-flash', 'claude-opus-5-5', 'claude-sonnet-5-5', 'gpt-oss-120b-medium'])
+  assert.deepEqual(await adapter.listModels('antigravity'), [], 'metadata resolution is not model discovery')
 })
 
 test('a tool call parks, ends the step, and resumes the same ACP turn with the DSH result', async () => {
@@ -405,50 +404,18 @@ test('agy network-issue text warnings fail as retryable TRANSPORT with zero leak
   assert.equal(textOf(retriedStep2), 'after-tool retry ok')
 })
 
-test('agy high-traffic text warnings fail as RATE_LIMIT and fail over to a healthy account without leaking text', async () => {
-  const rootA = mkdtempSync(join(tmpdir(), 'agy-traffic-a-'))
-  const rootB = mkdtempSync(join(tmpdir(), 'agy-traffic-b-'))
-  const homeA = join(rootA, 'home')
-  const { adapter, runtime } = makeRuntime({
-    config: {
-      accounts: [
-        { id: 'a', displayName: 'A', home: rootA, enabled: true, env: {}, contextWindow: 0, system: false, visibleModels: [], priority: 1, weight: 1 },
-        { id: 'b', displayName: 'B', home: rootB, enabled: true, env: {}, contextWindow: 0, system: false, visibleModels: [], priority: 2, weight: 1 },
-      ],
-    },
-    host: {
-      spawnAcp: (argv, cwd, env) => {
-        const childEnv = { ...process.env, ...env }
-        if (env?.HOME === homeA) {
-          childEnv.FAKE_AGY_PLAN = JSON.stringify([
-            { chunks: ['\n⚠ Our servers are experiencing high traffic right now, please try again in a minute.\n'] },
-          ])
-        }
-        const child = spawn(process.execPath, [argv[0], ...argv.slice(1)], { cwd, env: childEnv, stdio: ['pipe', 'pipe', 'pipe'] })
-        let stderr = ''
-        child.stderr.on('data', d => { stderr += d })
-        return {
-          stdin: child.stdin,
-          stdout: child.stdout,
-          exited: new Promise(resolve => child.on('exit', (code, signal) => resolve({ code, signal }))),
-          terminate: () => child.kill(),
-          stderrTail: () => stderr,
-        }
-      },
-    },
-  })
-
-  const chunks = await collect(adapter.stream({
-    provider: 'antigravity',
-    model: 'gemini-3.8-flash',
-    sessionId: 'S11e',
-    messages: [sys, user('u1', 'hello failover')],
-  }))
-  assert.equal(finishOf(chunks).reason.kind, 'stop')
-  assert.doesNotMatch(textOf(chunks), /high traffic/)
-  assert.match(textOf(chunks), /^echo:gemini-3\.8-flash:high:hello failover$/)
-  assert.equal(runtime.status().lastAccount, 'b')
-  assert.equal(runtime.status().accounts.find(row => row.id === 'a').cooldowns.length, 1)
+test('high-traffic errors preserve RATE_LIMIT without hidden account failover or leaked text', async () => {
+  const { adapter, runtime, prompts } = makeRuntime({ env: { FAKE_AGY_PLAN: JSON.stringify([
+    { text: 'Our servers are experiencing high traffic right now, please try again in a minute.' },
+    { text: 'healthy explicit retry' },
+  ]) } })
+  const request = { provider: 'antigravity', model: 'gemini-4-argon', sessionId: 'traffic', messages: [sys, user('u1', 'ping')] }
+  const leaked = []
+  await assert.rejects(async () => { for await (const chunk of adapter.stream(request)) leaked.push(chunk) }, error => error.code === 'RATE_LIMIT')
+  assert.deepEqual(leaked, [])
+  assert.equal(prompts().length, 1, 'one stream call never schedules another account or hidden retry')
+  assert.equal(runtime.status().lastAccount, 'default')
+  assert.equal(textOf(await collect(adapter.stream(request))), 'healthy explicit retry')
 })
 
 test('cache reads stay disjoint from the uncached input count', () => {
@@ -517,7 +484,8 @@ test('the ACP client identity is on the third-party-model allowlist', async () =
 })
 
 test('every endpoint-advertised family including Sonnet and GPT-OSS appears in the picker and resolves cleanly', async () => {
-  const { adapter } = makeRuntime()
+  const { adapter, runtime } = makeRuntime()
+  await runtime.warmup()
   const listed = (await adapter.listModels('antigravity')).map(m => m.id)
   assert.deepEqual(listed, ['gemini-4-argon', 'gemini-3.8-flash', 'claude-opus-5-5', 'claude-sonnet-5-5', 'gpt-oss-120b-medium'])
   const claude = await adapter.resolveModel('antigravity', 'claude-opus-5-5')
@@ -1248,10 +1216,10 @@ test('session-index.json resumes ACP sessions via native session/load across cap
   const restarted = new AntigravityRuntime({
     config: {
       provider: 'antigravity', displayName: 'Antigravity', command: fake, home: first.home,
-      accounts: [{ id: 'default', displayName: '', home: '', enabled: true, env: {}, contextWindow: 0, system: true, visibleModels: [], priority: 1, weight: 1 }],
+      accountLabel: '', visibleModels: [],
       contextWindow: 0, defaultEffort: 'high', autoPatch: false, patchScript: join(first.home, 'missing.py'),
       maxLiveSessions: 16, idleSessionTtlMs: 600_000, parkSettleMs: 80, keepAliveMs: 1_000,
-      longDecodeContinuations: 3, warmup: false, quotaTtlMs: 60_000,
+      longDecodeContinuations: 3, warmup: false,
     },
     spawnAcp: (argv, cwd) => {
       const child = spawn(process.execPath, [argv[0], ...argv.slice(1)], { cwd, env: { ...process.env, FAKE_AGY_LOG: log2, FAKE_AGY_MCP: mcp2 }, stdio: ['pipe', 'pipe', 'pipe'] })
@@ -1366,42 +1334,17 @@ test('prompt hierarchy lifts AGENTS.md into <user_rules>, preserves oversized to
   assert.equal(call.name, 'inspect_metrics')
 })
 
-/** One account as a live configure request spells it. */
-const runtimeAccount = (id, extra = {}) => ({
-  id, displayName: '', home: '', enabled: true, env: {}, contextWindow: 0,
-  visibleModels: [], priority: 1, weight: 1, ...extra,
-})
-
-test('live configure keeps the machine account row and its system flag', () => {
-  const { runtime } = makeRuntime()
-  const status = runtime.configure({
-    accounts: [runtimeAccount('default', { system: true, displayName: '本机' }), runtimeAccount('work', { displayName: 'Work' })],
-  })
-  assert.deepEqual(status.accounts.map(row => [row.id, row.system]), [['default', true], ['work', false]])
-  assert.equal(status.accounts[0].label, '本机', 'the machine remark survives the round trip')
-  // The list is the only truth: a save without the machine entry removes it.
-  const removed = runtime.configure({ accounts: [runtimeAccount('work', { displayName: 'Work' })] })
-  assert.deepEqual(removed.accounts.map(row => row.id), ['work'])
-})
-
-test('the context window is a global default narrowed by every account that can serve the model', () => {
+test('the fixed system account uses a local remark and provider-wide context settings', () => {
   const { runtime } = makeRuntime({ config: { contextWindow: 900_000 } })
-  const windows = () => runtime.contextWindowFor('gpt-oss-120b-medium')
-  assert.equal(windows(), 900_000, 'the global default applies while every account follows it')
-  runtime.configure({ accounts: [runtimeAccount('default', { system: true, contextWindow: 512_000 })] })
-  assert.equal(windows(), 512_000)
-  runtime.configure({ accounts: [runtimeAccount('default', { system: true, contextWindow: 1_048_576 })] })
-  assert.equal(windows(), 900_000, 'an account can narrow the global window, never widen it')
-  runtime.configure({ contextWindow: 0, accounts: [runtimeAccount('default', { system: true })] })
-  assert.equal(windows(), 131_072, 'with no global override GPT-OSS keeps its own window')
-  runtime.configure({ accounts: [runtimeAccount('default', { system: true, contextWindow: 100_000 })] })
-  assert.equal(windows(), 100_000)
-  runtime.configure({
-    contextWindow: 900_000,
-    accounts: [runtimeAccount('default', { system: true, contextWindow: 512_000, visibleModels: ['claude-opus-5-5'] })],
-  })
-  assert.equal(runtime.servesModel('default', 'gpt-oss-120b-medium'), false, 'an account visibleModels list still narrows on its own')
-  assert.equal(windows(), 900_000, 'an account that cannot serve the model never narrows its window')
+  const status = runtime.configure({ accountLabel: ' 本机 ' })
+  assert.equal(status.accountLabel, '本机')
+  assert.equal(Object.hasOwn(status, 'accounts'), false)
+  assert.equal(runtime.servesModel('other', 'gemini-4-argon'), false)
+  assert.equal(runtime.contextWindowFor('gpt-oss-120b-medium'), 900_000)
+  runtime.configure({ contextWindow: 0 })
+  assert.equal(runtime.contextWindowFor('gpt-oss-120b-medium'), 131_072)
+  runtime.configure({ visibleModels: ['claude-opus-5-5'] })
+  assert.equal(runtime.servesModel('default', 'gemini-4-argon'), false)
 })
 
 test('Windows preflight locates agy.exe in LOCALAPPDATA and PATH while skipping IDE shims and WindowsApps stubs', async () => {
@@ -1490,28 +1433,6 @@ test('Windows preflight locates agy.exe in LOCALAPPDATA and PATH while skipping 
   assert.doesNotThrow(() => assertSupportedAgyVersion('Antigravity CLI 1.5.2', defaultWinExe))
   assert.doesNotThrow(() => assertSupportedAgyVersion('fake-agy 0.0.1', defaultWinExe))
 
-  // File-backed OAuth token sync seeds isolated home and updates only when source is newer.
-  const cliAuthDir = join(root, '.gemini', 'antigravity-cli')
-  const isolatedHome = join(root, '.dsh', 'cache', 'antigravity-acp')
-  mkdirSync(cliAuthDir, { recursive: true })
-  const srcToken = join(cliAuthDir, 'antigravity-oauth-token')
-  const dstToken = join(isolatedHome, 'agy', 'antigravity-oauth-token')
-  writeFileSync(srcToken, 'token-v1')
-  utimesSync(srcToken, 1_700_000_100, 1_700_000_100)
-  prepareHome(isolatedHome, root)
-  assert.equal(readFileSync(dstToken, 'utf8'), 'token-v1')
-
-  // Newer refreshed token in isolated home is preserved over older CLI token.
-  writeFileSync(dstToken, 'token-refreshed')
-  utimesSync(dstToken, 1_700_000_200, 1_700_000_200)
-  syncOAuthToken(isolatedHome, root)
-  assert.equal(readFileSync(dstToken, 'utf8'), 'token-refreshed')
-
-  // Fresh terminal `agy` sign-in updates isolated home when source mtime advances.
-  writeFileSync(srcToken, 'token-v3')
-  utimesSync(srcToken, 1_700_000_300, 1_700_000_300)
-  syncOAuthToken(isolatedHome, root)
-  assert.equal(readFileSync(dstToken, 'utf8'), 'token-v3')
 })
 
 test('multi-turn tool calls mint distinct session-wide ToolCallIds so PTC subCallIds (<id>:ptc:1) never repeat across turns', async () => {
@@ -1540,4 +1461,40 @@ test('multi-turn tool calls mint distinct session-wide ToolCallIds so PTC subCal
   }
   assert.equal(seenCallIds.size, 3)
   assert.equal(seenPtcSubCallIds.size, 3)
+})
+
+test('startup is passive and ACP discovery issues no quota, credential or login commands', async () => {
+  const commands = []
+  const { runtime, adapter } = makeRuntime({ host: { runCommand: async argv => {
+    commands.push([...argv])
+    assert.deepEqual(argv.slice(1), ['--version'])
+    return { code: 0, stdout: 'fake-agy 0.0.1', stderr: '' }
+  } } })
+  assert.deepEqual(commands, [])
+  assert.deepEqual(await adapter.listModels('antigravity'), [])
+  assert.equal(runtime.catalog.observed, false)
+  assert.equal(typeof runtime.quotaFor, 'undefined')
+  assert.equal(typeof runtime.beginLogin, 'undefined')
+  await runtime.warmup()
+  assert.equal(commands.length, 1)
+  assert.equal(runtime.catalog.observed, true)
+  assert.ok((await adapter.listModels('antigravity')).some(model => model.id === 'gemini-4-argon'))
+})
+
+test('single-account quota and transient errors keep original codes and finite retry policy', async () => {
+  for (const [directive, mode, code] of [['QUOTA', 'quota', 'QUOTA'], ['RATELIMIT', 'ratelimit', 'RATE_LIMIT']]) {
+    const { runtime, adapter, prompts } = makeRuntime({ env: { FAKE_AGY_FAIL: mode } })
+    await assert.rejects(collect(adapter.stream({ provider: 'antigravity', model: 'gemini-4-argon', messages: [sys, user('u1', directive)] })), error => {
+      assert.equal(error.code, code)
+      // The fake CLI answers 429 with "please retry in 2s"; the parsed delay is
+      // carried on the serializable failure facts, not on the Error itself.
+      if (code === 'RATE_LIMIT') assert.equal(error.failure?.providerRetryAfterMs, 2_000)
+      return true
+    })
+    assert.equal(prompts().length, 1)
+    assert.equal(runtime.status().lastAccount, 'default')
+    const policy = adapter.providerRetryPolicy('antigravity')
+    assert.equal(policy.maxRetries, 4)
+    assert.ok(!policy.retryableCodes.includes('QUOTA'))
+  }
 })

@@ -69,13 +69,13 @@ test('the cache stores the advertised set so a later widen survives a restart', 
   assert.deepEqual(reopened.list().map(m => m.id), ['gemini-4-argon', 'claude-opus-5-5'])
 })
 
-test('a cache written before the visibility layer still loads', () => {
+test('a legacy unproven cache stays empty until ACP discovery', () => {
   const path = cacheIn()
   writeFileSync(path, JSON.stringify({ models: [{ id: 'gemini-4-argon', name: 'Gemini 4 Argon' }], efforts: ['low', 'medium', 'high'] }))
   const catalog = new ModelCatalog(path)
-  assert.deepEqual(catalog.list().map(m => m.id), ['gemini-4-argon'])
+  assert.deepEqual(catalog.list(), [])
   catalog.applyVisibility(['gemini-4-argon'])
-  assert.deepEqual(catalog.availableModels().map(m => [m.id, m.enabled]), [['gemini-4-argon', true]])
+  assert.deepEqual(catalog.availableModels(), [])
 })
 
 test('two narrowing allowlists intersect rather than replace', () => {

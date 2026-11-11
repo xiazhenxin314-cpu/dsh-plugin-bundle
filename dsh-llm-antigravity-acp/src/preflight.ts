@@ -9,7 +9,7 @@
  * @module dsh-llm-antigravity-acp/preflight
  */
 
-import { chmodSync, copyFileSync, existsSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { delimiter, isAbsolute, join } from 'node:path'
 
@@ -173,54 +173,13 @@ export function defaultHome(): string {
 }
 
 /**
- * Seed or refresh the isolated `antigravity-oauth-token` file from the account's
- * CLI home (`<userHome>/.gemini/antigravity-cli` or `<userHome>/.gemini/antigravity`)
- * whenever the host uses file-backed token storage (Windows / headless Linux)
- * or the user signed in again from a terminal.
- * @param home - isolated `--gemini-dir` root.
- * @param userHome - user home owning the source token file.
- */
-export function syncOAuthToken(home: string, userHome: string = homedir()): void {
-  const appData = join(home, 'agy')
-  const dst = join(appData, 'antigravity-oauth-token')
-  const sources = [
-    join(userHome, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
-    join(userHome, '.gemini', 'antigravity', 'antigravity-oauth-token'),
-  ]
-  let newestSrc: { path: string; mtimeMs: number } | undefined
-  for (const candidate of sources) {
-    try {
-      const st = statSync(candidate)
-      if (st.size > 0 && (newestSrc === undefined || st.mtimeMs > newestSrc.mtimeMs)) {
-        newestSrc = { path: candidate, mtimeMs: st.mtimeMs }
-      }
-    } catch (_missingSrc) {
-      // Source token file does not exist.
-    }
-  }
-  if (newestSrc === undefined) return
-  try {
-    const dstStat = statSync(dst)
-    if (dstStat.size > 0 && dstStat.mtimeMs >= newestSrc.mtimeMs) return
-  } catch (_missingDst) {
-    // Destination token file does not exist yet.
-  }
-  mkdirSync(appData, { recursive: true })
-  copyFileSync(newestSrc.path, dst)
-  try {
-    chmodSync(dst, 0o600)
-  } catch (_advisoryMode) {
-    // Mode bits are advisory on Windows.
-  }
-}
-
-/**
- * Write the isolated Antigravity home: bridge agent and ACP settings.
+ * Write only the isolated bridge configuration and ACP settings.
+ * Authentication is owned by the official CLI; no host settings or login stores
+ * are inspected or copied into this directory.
  * @param home - absolute home directory used as `--gemini-dir`.
- * @param userHome - optional user home override for file-backed token sync.
  * @returns the empty workspace directory used as every session's cwd.
  */
-export function prepareHome(home: string, userHome: string = homedir()): string {
+export function prepareHome(home: string): string {
   const agentDir = join(home, 'config', 'plugins', BRIDGE_AGENT, 'agents')
   mkdirSync(agentDir, { recursive: true })
   writeIfChanged(join(home, 'config', 'plugins', BRIDGE_AGENT, 'plugin.json'), `${JSON.stringify({ name: BRIDGE_AGENT }, null, 2)}\n`)
@@ -238,7 +197,6 @@ export function prepareHome(home: string, userHome: string = homedir()): string 
   const appData = join(home, 'agy')
   mkdirSync(join(appData, 'conversations'), { recursive: true })
   mkdirSync(join(home, 'antigravity', 'conversations'), { recursive: true })
-  syncOAuthToken(home, userHome)
   seedCliSettingsFile(join(appData, 'settings.json'))
   const defaultCliAppData = join(home, 'antigravity-cli')
   mkdirSync(defaultCliAppData, { recursive: true })
@@ -250,7 +208,6 @@ export function prepareHome(home: string, userHome: string = homedir()): string 
 
 function seedCliSettingsFile(settingsPath: string): void {
   const settings = readJson(settingsPath)
-  const hostCliSettings = readJson(join(homedir(), '.gemini', 'antigravity-cli', 'settings.json'))
   const rawModel = typeof settings.model === 'string' ? settings.model.trim() : ''
   const model = rawModel.length > 0 && rawModel !== 'Gemini 4 Argon (Medium)'
     ? rawModel
@@ -258,14 +215,10 @@ function seedCliSettingsFile(settingsPath: string): void {
   const contextWindow = typeof settings.contextWindow === 'string' && settings.contextWindow.trim().length > 0
     ? settings.contextWindow
     : DEFAULT_SEEDED_CONTEXT_WINDOW
-  const useG1Credits = typeof settings.useG1Credits === 'boolean'
-    ? settings.useG1Credits
-    : (typeof hostCliSettings.useG1Credits === 'boolean' ? hostCliSettings.useG1Credits : undefined)
   writeIfChanged(
     settingsPath,
     `${JSON.stringify({
       ...settings,
-      ...(useG1Credits !== undefined ? { useG1Credits } : {}),
       contextWindow,
       model,
       toolPermission: 'request-review',

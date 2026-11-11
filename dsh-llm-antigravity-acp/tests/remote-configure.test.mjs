@@ -1,198 +1,119 @@
-// Unit tests of the configure wire shape and its persistence: the request
-// carries the whole account list (this Mac's `system: true` row included), a
-// save never freezes the machine display label into a remark, and the retired
-// `systemProfile` / `useSystemAccount` / per-account `families` fields are
-// ignored rather than resurrected.
+// Fake runtime/settings only: no CLI, profile, login, credential or quota calls.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Context } from '@deepseek-ai/cordis'
-import { AntigravityRemote, parseConfigureRequest, profileFromStatus, storedAccounts } from '../lib/remote.js'
+import { AntigravityRemote, INVOCATIONS, parseConfigureRequest } from '../lib/remote.js'
 
-/** One account as a configure request spells it. */
-const profile = (id, extra = {}) => ({
-  id,
-  displayName: '',
-  home: '',
-  enabled: true,
-  env: {},
-  contextWindow: 0,
-  visibleModels: [],
-  priority: 1,
-  weight: 1,
-  ...extra,
-})
-
-/** One row as the runtime reports it back. */
-const row = (id, extra = {}) => ({
-  id,
-  label: '',
-  system: false,
-  enabled: true,
-  root: undefined,
-  home: '',
-  env: {},
-  homeDir: '',
-  geminiDir: '',
-  state: 'idle',
-  error: undefined,
-  cooldowns: [],
-  sessions: 0,
-  email: undefined,
-  contextWindow: 0,
-  visibleModels: [],
-  priority: 1,
-  weight: 1,
-  proxyUrl: '',
-  usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-  ...extra,
-})
-
-const machineRow = (extra = {}) => row('default', {
-  label: 'This Mac',
-  system: true,
-  env: { HTTPS_PROXY: 'http://127.0.0.1:7890' },
-  contextWindow: 512_000,
-  visibleModels: ['claude-opus-5-5'],
-  priority: 2,
-  weight: 5,
-  ...extra,
-})
-
-test('a configure request carries the whole account list with the machine row in it', () => {
-  const parsed = parseConfigureRequest({
-    accounts: [
-      profile('default', { system: true, contextWindow: 256_000 }),
-      profile('work', { displayName: 'Work' }),
-    ],
-  })
-  assert.equal(parsed.accounts.length, 2)
-  assert.equal(parsed.accounts[0].id, 'default')
-  assert.equal(parsed.accounts[0].system, true)
-  assert.equal(parsed.accounts[0].contextWindow, 256_000)
-  assert.equal(parsed.accounts[1].id, 'work')
-  assert.equal(parsed.accounts[1].system, undefined, 'a declared account carries no system marker')
-  assert.equal(parsed.accounts[1].displayName, 'Work')
-})
-
-test('a configure request ignores the retired systemProfile and useSystemAccount fields', () => {
-  const parsed = parseConfigureRequest({
-    accounts: [profile('work')],
-    systemProfile: { env: { HTTPS_PROXY: 'http://p' }, contextWindow: 128_000, visibleModels: ['gemini-4-argon'], priority: 3, weight: 4 },
-    useSystemAccount: false,
-  })
-  assert.equal(Object.hasOwn(parsed, 'systemProfile'), false, 'the retired field is not passed on')
-  assert.equal(Object.hasOwn(parsed, 'useSystemAccount'), false, 'the retired switch is not passed on')
-  assert.equal(parsed.accounts.length, 1, 'the list is exactly what the page declared')
-  assert.equal(parsed.accounts[0].id, 'work')
-  assert.equal(parsed.accounts[0].contextWindow, 0, 'the retired profile never edits an account')
-})
-
-test('a configure request ignores a retired per-account families gate', () => {
-  const parsed = parseConfigureRequest({ accounts: [{ id: 'work', families: ['gemini'] }] })
-  assert.equal(Object.hasOwn(parsed.accounts[0], 'families'), false)
-  assert.deepEqual(parsed.accounts[0].visibleModels, [], 'families no longer narrows a model list')
-  const kept = parseConfigureRequest({ accounts: [{ id: 'work', families: [], visibleModels: ['claude-opus-5-5'] }] })
-  assert.deepEqual(kept.accounts[0].visibleModels, ['claude-opus-5-5'])
-})
-
-test('a request that touches no account leaves the list alone', () => {
-  const parsed = parseConfigureRequest({ contextWindow: 900_000 })
-  assert.equal(parsed.accounts, undefined)
-  assert.equal(parsed.contextWindow, 900_000)
-})
-
-test('stored accounts keep the machine row and never freeze its display label', () => {
-  const stored = storedAccounts([
-    machineRow(),
-    row('work', { label: 'Work', home: '/custom/work', contextWindow: 128_000, visibleModels: ['gemini-4-argon'] }),
-  ])
-  assert.deepEqual(stored.map(entry => [entry.id, entry.system === true]), [['default', true], ['work', false]])
-  assert.equal(stored[0].displayName, '', 'the default label is not a remark the user chose')
-  assert.deepEqual(stored[0].visibleModels, ['claude-opus-5-5'])
-  assert.equal(stored[1].home, '/custom/work')
-  assert.deepEqual(stored[1].visibleModels, ['gemini-4-argon'])
-})
-
-test('a renamed machine row round-trips its remark', () => {
-  const stored = storedAccounts([machineRow({ label: '公司本机' })])
-  assert.equal(stored[0].displayName, '公司本机')
-  assert.equal(stored[0].system, true)
-  assert.equal(profileFromStatus(machineRow()).system, true)
-})
-
-/** Minimal status rows for a runtime stub that echoes the accounts it was given. */
-const statusRows = (accounts) => accounts.map(entry => row(entry.id, {
-  label: entry.system === true && entry.displayName === '' ? 'This Mac' : entry.displayName,
-  system: entry.system === true,
-  home: entry.home,
-  env: { ...entry.env },
-  contextWindow: entry.contextWindow,
-  visibleModels: [...entry.visibleModels],
-  priority: entry.priority ?? 1,
-  weight: entry.weight ?? 1,
-}))
-
-/** Status the runtime reports after a patch. */
-const statusOf = (accounts) => ({
-  state: 'idle', contextWindow: 0, configuredContextWindow: 0, defaultEffort: 'high',
-  longDecodeContinuations: 3, models: [], availableModels: [], visibleModels: [], efforts: [],
-  liveSessions: 0, activeTurns: 0, accounts: statusRows(accounts),
-})
-
-/** A remote over a runtime stub that records the patch and echoes its list. */
-const mountRemote = (currentRows) => {
+function mountRemote({ writable = true, rejectWrite = false, failWarmup = false } = {}) {
   const ctx = new Context()
   const writes = []
-  ctx.provide('settings', { writable: true, update: async (_ns, values) => { writes.push(values) } })
+  ctx.provide('settings', {
+    writable,
+    async update(ns, values) {
+      writes.push({ ns, values })
+      if (rejectWrite) throw new Error('profile is read-only')
+    },
+  })
   const patches = []
+  const warmups = []
+  let state = { state: 'idle', accountLabel: '', models: [], visibleModels: [] }
   const runtime = {
-    accounts: () => currentRows,
-    configure: (next) => {
-      patches.push(next)
-      return statusOf(next.accounts ?? currentRows.map(entry => profileFromStatus(entry)))
+    status: () => state,
+    configure(patch) {
+      patches.push(patch)
+      state = { ...state, ...patch }
+      return state
+    },
+    async warmup(...args) {
+      warmups.push(args)
+      state = failWarmup ? { ...state, state: 'error', error: 'fake discovery failed' } : { ...state, state: 'ready' }
+      if (failWarmup) throw new Error('fake discovery failed')
     },
   }
-  return { remote: new AntigravityRemote(ctx, { runtime, settingsNs: 'llm-antigravity-acp' }), patches, writes }
+  return { remote: new AntigravityRemote(ctx, { runtime, settingsNs: 'test-antigravity' }), writes, patches, warmups }
 }
 
-test('remote.configure applies and persists the whole list, machine row included', async () => {
-  const { remote, patches, writes } = mountRemote([machineRow(), row('work', { label: 'Work' })])
-  await remote.configure({
-    accounts: [
-      profile('default', { system: true, contextWindow: 256_000 }),
-      profile('work', { displayName: 'Work' }),
-    ],
+test('only status, catalog warmup and configure are remotely registered', () => {
+  assert.deepEqual(INVOCATIONS.map(item => item.method), ['status', 'warmup', 'configure'])
+  assert.deepEqual(INVOCATIONS.find(item => item.method === 'warmup').parameters, [])
+  assert.equal(Object.hasOwn(INVOCATIONS.find(item => item.method === 'configure').parameters[0], 'acceptsUndefined'), false)
+  for (const method of ['quota', 'accounts', 'login', 'loginCode', 'cancelLogin']) {
+    assert.equal(typeof AntigravityRemote.prototype[method], 'undefined')
+  }
+})
+
+test('configure accepts the system remark and retained live settings', () => {
+  assert.deepEqual(parseConfigureRequest({
+    accountLabel: '  本机工作账号  ', contextWindow: 512_000, defaultEffort: 'medium',
+    longDecodeContinuations: 5, visibleModels: [' discovered-model ', 'discovered-model', 'another-model'],
+  }), {
+    accountLabel: '本机工作账号', contextWindow: 512_000, defaultEffort: 'medium',
+    longDecodeContinuations: 5, visibleModels: ['discovered-model', 'another-model'],
   })
-
-  assert.deepEqual(patches[0].accounts.map(entry => [entry.id, entry.system === true]), [
-    ['default', true],
-    ['work', false],
-  ], 'the runtime sees the machine row the page declared')
-  assert.equal(patches[0].accounts[0].contextWindow, 256_000)
-
-  assert.equal(writes.length, 1)
-  const stored = writes[0]
-  assert.deepEqual(stored.accounts.map(entry => [entry.id, entry.system === true]), [
-    ['default', true],
-    ['work', false],
-  ], 'the stored profile keeps this Mac login')
-  assert.equal(Object.hasOwn(stored, 'systemProfile'), false, 'the retired key is never written again')
-  assert.equal(Object.hasOwn(stored, 'useSystemAccount'), false)
-  assert.equal(stored.accounts[0].displayName, '', 'the machine display label is not stored as a remark')
+  assert.deepEqual(parseConfigureRequest({ accountLabel: ' ', contextWindow: 0, longDecodeContinuations: 0, visibleModels: [] }), {
+    accountLabel: '', contextWindow: 0, longDecodeContinuations: 0, visibleModels: [],
+  })
 })
 
-test('remote.configure stores a list without the machine row when the page removed it', async () => {
-  const { remote, patches, writes } = mountRemote([machineRow(), row('work', { label: 'Work' })])
-  await remote.configure({ accounts: [profile('work', { displayName: 'Work' })] })
-
-  assert.deepEqual(patches[0].accounts.map(entry => entry.id), ['work'], 'the runtime drops the machine account')
-  assert.deepEqual(writes[0].accounts.map(entry => entry.id), ['work'], 'the stored list drops it too')
+test('system remarks share the 64-codepoint bound and whitespace normalization', () => {
+  assert.deepEqual(parseConfigureRequest({ accountLabel: '😀'.repeat(64) }), { accountLabel: '😀'.repeat(64) })
+  assert.deepEqual(parseConfigureRequest({ accountLabel: '  work \n laptop  ' }), { accountLabel: 'work laptop' })
 })
 
-test('remote.configure persists nothing when the request touches no account', async () => {
-  const { remote, writes } = mountRemote([machineRow()])
-  await remote.configure({ contextWindow: 900_000 })
-  assert.equal(writes.length, 1)
-  assert.equal(writes[0].accounts, undefined)
-  assert.equal(writes[0].contextWindow, 900_000)
+test('retired account, routing and quota fields never become live overrides', () => {
+  assert.deepEqual(parseConfigureRequest({
+    accounts: [{ id: 'other', system: false, env: { HOME: '/fake/other' } }],
+    accountId: 'other', useSystemAccount: false, systemProfile: { enabled: false },
+    configVersion: 2, quotaTtlMs: 5_000, home: '/fake/other', env: { HOME: '/fake/other' },
+    accountLabel: 'Just a remark',
+  }), { accountLabel: 'Just a remark' })
+})
+
+test('invalid supported configure values fail before a runtime or profile change', async () => {
+  const { remote, patches, writes } = mountRemote()
+  for (const payload of [null, [], 'bad', { accountLabel: 1 }, { accountLabel: 'x'.repeat(65) }, { accountLabel: '😀'.repeat(65) },
+    { contextWindow: -1 }, { contextWindow: 1.5 }, { contextWindow: 1_048_577 }, { contextWindow: NaN },
+    { defaultEffort: 'max' }, { longDecodeContinuations: 17 }, { longDecodeContinuations: -1 },
+    { longDecodeContinuations: 1.5 }, { visibleModels: 'model' }, { visibleModels: [''] },
+    { visibleModels: ['x'.repeat(201)] }, { visibleModels: Array(501).fill('model') },
+  ]) await assert.rejects(remote.configure(payload), TypeError)
+  assert.deepEqual(patches, [])
+  assert.deepEqual(writes, [])
+})
+
+test('an explicit save applies and persists only supported normalized settings', async () => {
+  const { remote, patches, writes } = mountRemote()
+  const result = await remote.configure({ accountLabel: '  Laptop  ', defaultEffort: 'low', accounts: [] })
+  assert.equal(result.accountLabel, 'Laptop')
+  assert.deepEqual(patches, [{ accountLabel: 'Laptop', defaultEffort: 'low' }])
+  assert.deepEqual(writes, [{ ns: 'test-antigravity', values: { accountLabel: 'Laptop', defaultEffort: 'low' } }])
+  await remote.configure({ accountLabel: '' })
+  assert.equal(remote.status().accountLabel, '')
+  assert.deepEqual(writes.at(-1).values, { accountLabel: '' })
+})
+
+test('an empty or retired-only request does not write profiles or reconfigure runtime', async () => {
+  const { remote, patches, writes } = mountRemote()
+  await remote.configure({})
+  await remote.configure({ accounts: [], useSystemAccount: false, configVersion: 0 })
+  assert.deepEqual(patches, [])
+  assert.deepEqual(writes, [])
+})
+
+test('unwritable or rejected profile saves retain the live setting', async () => {
+  for (const options of [{ writable: false }, { rejectWrite: true }]) {
+    const { remote, writes } = mountRemote(options)
+    assert.equal((await remote.configure({ accountLabel: 'Local remark' })).accountLabel, 'Local remark')
+    assert.equal(writes.length, options.writable === false ? 0 : 1)
+  }
+})
+
+test('warmup has no account selection and returns runtime failures through status', async () => {
+  for (const failWarmup of [false, true]) {
+    const { remote, warmups, writes } = mountRemote({ failWarmup })
+    const status = await remote.warmup()
+    assert.deepEqual(warmups, [[]])
+    assert.equal(status.state, failWarmup ? 'error' : 'ready')
+    assert.deepEqual(writes, [])
+  }
 })

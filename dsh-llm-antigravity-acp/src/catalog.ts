@@ -53,15 +53,6 @@ export function intersectVisible(provider: readonly string[], account: readonly 
   return provider.filter(id => account.includes(id))
 }
 
-/** Families shown before the first ACP session reports the account's catalog. */
-export const FALLBACK_MODELS: readonly CatalogModel[] = [
-  { id: 'gemini-4-argon', name: 'Gemini 4 Argon' },
-  { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
-  { id: 'claude-opus-5-5', name: 'Claude Opus 5.5' },
-  { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5' },
-  { id: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' },
-]
-
 /** Display names of the efforts. */
 export const EFFORT_NAMES: Record<Effort, string> = { low: 'Low', medium: 'Medium', high: 'High' }
 
@@ -107,7 +98,7 @@ export class ModelCatalog {
 
   /** @param cachePath - JSON cache file. */
   constructor(private readonly cachePath: string) {
-    this.advertised = this.load() ?? [...FALLBACK_MODELS]
+    this.advertised = this.load() ?? []
     this.models = this.advertised
   }
 
@@ -191,57 +182,6 @@ export class ModelCatalog {
   }
 
   /**
-   * Merge per-account model inventories into the provider-level catalog union.
-   * An account on Ultra may offer `claude-opus-5-5` + `gemini-4-argon` while a
-   * promotional/student Pro account offers `claude-opus-4-6-thinking`; the
-   * provider union exposes every entitled model so requests route to the
-   * account that supports them.
-   * @param inventories - ordered model lists of enabled signed-in accounts.
-   * @param effortsByModel - merged per-model efforts across accounts.
-   * @param maxTokensByModel - merged per-model context windows across accounts.
-   * @param visible - provider allowlist.
-   * @returns whether the offered list changed.
-   */
-  mergeAccountInventories(
-    inventories: readonly (readonly CatalogModel[])[],
-    effortsByModel: Readonly<Record<string, readonly Effort[]>>,
-    maxTokensByModel: Readonly<Record<string, number>>,
-    visible?: readonly string[],
-  ): boolean {
-    if (visible !== undefined) this.visible = [...visible]
-    const union: CatalogModel[] = []
-    const seen = new Set<string>()
-    for (const list of inventories) {
-      for (const item of list) {
-        if (seen.has(item.id)) continue
-        seen.add(item.id)
-        union.push({ id: item.id, name: item.name })
-      }
-    }
-    if (union.length === 0) return false
-    this.observed = true
-    let metaChanged = false
-    for (const [id, offered] of Object.entries(effortsByModel)) {
-      const next = EFFORTS.filter(e => offered.includes(e))
-      if (JSON.stringify(this.byModel.get(id)) !== JSON.stringify(next)) {
-        this.byModel.set(id, next)
-        metaChanged = true
-      }
-    }
-    for (const [id, tokens] of Object.entries(maxTokensByModel)) {
-      if (tokens > 0 && this.maxTokens.get(id) !== tokens) {
-        this.maxTokens.set(id, tokens)
-        metaChanged = true
-      }
-    }
-    const changed = JSON.stringify(union) !== JSON.stringify(this.advertised)
-    if (changed) this.advertised = union
-    const narrowed = this.applyVisibility(this.visible)
-    if (changed || narrowed || metaChanged) this.save()
-    return changed || narrowed
-  }
-
-  /**
    * Fold session configuration options and the session's model inventory into
    * the catalog.
    * @param options - options from `session/new` or `config_option_update`.
@@ -255,18 +195,17 @@ export class ModelCatalog {
     visible?: readonly string[] | undefined,
   ): boolean {
     if (visible !== undefined) this.visible = [...visible]
-    if (available !== undefined && available.length > 0) this.available = available
-    if (options === undefined) return false
-    const modelOption = options.find(o => o.id === 'model' || o.category === 'model')
-    const levelOption = options.find(o => o.id === 'thought_level' || o.category === 'thought_level')
+    if (available !== undefined) this.available = available
+    const modelOption = options?.find(o => o.id === 'model' || o.category === 'model')
+    const levelOption = options?.find(o => o.id === 'thought_level' || o.category === 'thought_level')
     const beforeEfforts = JSON.stringify(this.efforts)
     if (levelOption?.options !== undefined) {
       const offered = levelOption.options.map(o => o.value).filter((v): v is Effort => (EFFORTS as readonly string[]).includes(v))
       if (offered.length > 0) this.efforts = EFFORTS.filter(e => offered.includes(e))
     }
-    if (modelOption?.options === undefined || modelOption.options.length === 0) return false
-    const advertised = modelOption.options
-      .map(o => ({ id: o.value, name: o.name ?? o.value }))
+    const advertised = modelOption?.options?.map(o => ({ id: o.value, name: o.name ?? o.value }))
+      ?? available?.map(o => ({ id: o.modelId, name: o.name ?? o.modelId }))
+    if (advertised === undefined) return false
     this.observed = true
     const changed = JSON.stringify(advertised) !== JSON.stringify(this.advertised)
     if (changed) this.advertised = advertised
@@ -304,6 +243,7 @@ export class ModelCatalog {
       writeFileSync(this.cachePath, `${JSON.stringify({
         // Persist the advertised set, not the narrowed one: a later widen of
         // the allowlist must be able to restore families the CLI reported.
+        source: 'acp',
         models: this.advertised,
         efforts: this.efforts,
         byModel: Object.fromEntries(this.byModel),
@@ -318,11 +258,13 @@ export class ModelCatalog {
     if (!existsSync(this.cachePath)) return undefined
     try {
       const parsed = JSON.parse(readFileSync(this.cachePath, 'utf8')) as {
+        source?: string
         models?: CatalogModel[]
         efforts?: string[]
         byModel?: Record<string, string[]>
         maxTokens?: Record<string, number>
       }
+      if (parsed.source !== 'acp') return undefined
       if (Array.isArray(parsed.efforts)) {
         const efforts = parsed.efforts.filter((v): v is Effort => (EFFORTS as readonly string[]).includes(v))
         if (efforts.length > 0) this.efforts = efforts
@@ -344,7 +286,7 @@ export class ModelCatalog {
         : []
       return models.length > 0 ? models : undefined
     } catch (_cacheRead) {
-      // A corrupt cache falls back to the built-in families.
+      // A corrupt or legacy cache never invents an available catalog.
       return undefined
     }
   }

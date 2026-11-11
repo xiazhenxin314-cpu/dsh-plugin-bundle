@@ -1,6 +1,6 @@
 {
   "name": "dsh-llm-antigravity-acp",
-  "version": "0.4.0",
+  "version": "0.4.0-local.1",
   "description": "DeepSeek Harness primary model provider driving the local official Antigravity CLI (`agy acp`) over ACP v1 with DSH-owned tools; exposes Gemini and Claude models with per-model context, reasoning efforts, and lock-free subagent concurrency.",
   "keywords": [
     "dsh",
@@ -58,7 +58,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "node scripts/build.mjs --check",
-    "test": "node --test --test-concurrency=1 tests/*.test.mjs"
+    "test": "node --import ./scripts/peer-loader.mjs --test --test-concurrency=1 tests/*.test.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",

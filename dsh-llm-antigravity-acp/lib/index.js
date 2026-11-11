@@ -9,93 +9,13 @@
  * @module dsh-llm-antigravity-acp
  */
 import { homedir } from 'node:os';
-import { accountVisibleModels } from "./accounts.js";
 import { AntigravityAdapter } from "./adapter.js";
-import { FALLBACK_MODELS } from "./catalog.js";
-import { current } from "./config.js";
-import { CONFIG_VERSION, migrateConfig, normalizeAccounts, storedEqual } from "./migrate.js";
 import { AntigravityRemote, registerRemote } from "./remote.js";
 import { AntigravityRuntime } from "./runtime.js";
 export { Config } from "./config.js";
 export const name = 'llm-antigravity-acp';
 export const inject = ['llm', 'subprocess'];
-/**
- * Read a configuration object as plain data, with every volatile field taken at
- * its current value, so the migration sees arrays and numbers instead of live
- * settings references.
- * @param config - validated configuration.
- * @returns a plain snapshot.
- */
-function storedConfig(config) {
-    const out = {};
-    for (const [key, value] of Object.entries(config))
-        out[key] = current(value);
-    return out;
-}
 const REQUEST_IMAGE_MAX_BYTES = 7 * 1024 * 1024;
-/** @param version - stored `configVersion`. @returns whether the file already declares the merged shape. */
-function isCurrentShape(version) {
-    return typeof version === 'number' && Number.isFinite(version) && version >= CONFIG_VERSION;
-}
-/**
- * Store the migrated configuration in the plugin's settings profile.
- *
- * Only the two volatile fields the migration touches are written, and only
- * when they still differ from what the profile holds, so a second start writes
- * nothing. A write that the host refuses stays in memory for this run: the
- * provider keeps working and the next start simply migrates again.
- * @param input.settings - settings service, when the host offers one.
- * @param input.namespace - plugin settings namespace, the one the card uses.
- * @param input.migrated - result of the boot migration.
- * @param input.accounts - account list the profile holds right now.
- * @param input.configVersion - `configVersion` the profile holds right now.
- * @param input.warn - logger for a write that could not be stored.
- * @returns whether the profile was written, skipped, or refused.
- */
-export async function writeMigrationBack(input) {
-    const { settings, migrated } = input;
-    if (!migrated.changed)
-        return 'skipped';
-    if (settings?.writable !== true || typeof settings.update !== 'function')
-        return 'skipped';
-    const values = {};
-    if (Object.hasOwn(migrated.config, 'accounts') && !storedEqual(migrated.config.accounts, input.accounts)) {
-        values.accounts = migrated.config.accounts;
-    }
-    if (!storedEqual(migrated.config.configVersion, input.configVersion)) {
-        values.configVersion = migrated.config.configVersion;
-    }
-    if (Object.keys(values).length === 0)
-        return 'skipped';
-    try {
-        await settings.update(input.namespace, values);
-        return 'written';
-    }
-    catch (error) {
-        input.warn(`antigravity-acp: could not store the migrated configuration: ${error instanceof Error ? error.message : String(error)}`);
-        return 'failed';
-    }
-}
-/**
- * The account list as the runtime reads it.
- *
- * The stored setting stays a live reference, and this view normalizes it on
- * every read: a list edited in the settings page carries the merged shape at
- * once, and a file that already declares `configVersion` 2 never gets the
- * machine account it no longer lists.
- * @param config - validated configuration.
- * @param catalogIds - model ids the current catalog advertises.
- * @returns a view whose `get()` yields the normalized accounts.
- */
-export function liveAccounts(config, catalogIds) {
-    return {
-        get: () => normalizeAccounts(current(config.accounts), {
-            modern: isCurrentShape(current(config.configVersion)),
-            providerVisible: accountVisibleModels(current(config.visibleModels)),
-            catalogIds,
-        }),
-    };
-}
 /**
  * Plugin entry.
  * @param ctx - plugin context.
@@ -104,28 +24,8 @@ export function liveAccounts(config, catalogIds) {
 export function apply(ctx, config) {
     const subprocess = ctx.get('subprocess');
     const attachments = () => ctx.get('attachments');
-    // Normalize the stored shape before anything reads it: the account list is
-    // the only truth for the machine account, and an older file still carries the
-    // retired `useSystemAccount` / `systemProfile` pair and per-account families.
-    const catalogIds = FALLBACK_MODELS.map(model => model.id);
-    const migrated = migrateConfig(storedConfig(config), catalogIds);
-    for (const warning of migrated.warnings)
-        ctx.logger.warn(warning);
-    const runtimeConfig = {
-        ...migrated.config,
-        // The account list travels as a live view, so the settings surface keeps
-        // editing the same value the scheduler reads.
-        accounts: liveAccounts(config, catalogIds),
-        // Live settings references must survive the migration: the settings card
-        // writes them through the profile patch and the next read sees the change.
-        contextWindow: config.contextWindow,
-        defaultEffort: config.defaultEffort,
-        longDecodeContinuations: config.longDecodeContinuations,
-        visibleModels: config.visibleModels,
-    };
-    // Every account runs the CLI under its own `$HOME`, which is what keeps its
-    // credential store separate; callers pass that overlay, and an omitted
-    // overlay keeps the legacy behaviour of running under the real home.
+    // Every process uses the existing system login. Plugin cache configuration
+    // never changes the CLI account or writes a settings profile during boot.
     const systemEnv = { HOME: homedir() };
     const spawnAcp = (argv, cwd, env) => {
         const handle = subprocess.spawn({
@@ -170,7 +70,7 @@ export function apply(ctx, config) {
         return { data: Buffer.from(image.data).toString('base64'), mimeType: image.mediaType };
     };
     const runtime = new AntigravityRuntime({
-        config: runtimeConfig,
+        config,
         spawnAcp,
         runCommand,
         readImage,
@@ -202,16 +102,6 @@ export function apply(ctx, config) {
         if (typeof settings?.configure === 'function') {
             settingsCtx.effect(() => settings.configure({ auto: false }, ctx.fiber), 'antigravity-acp: custom settings card');
         }
-        // An older file keeps working from this start onwards either way; writing
-        // the merged list back means the next start reads the new shape directly.
-        void writeMigrationBack({
-            settings,
-            namespace: settingsNs,
-            migrated,
-            accounts: current(config.accounts),
-            configVersion: current(config.configVersion),
-            warn: message => ctx.logger.warn(message),
-        });
     });
     registerRemote(ctx);
     ctx.plugin(AntigravityRemote, { runtime, settingsNs });

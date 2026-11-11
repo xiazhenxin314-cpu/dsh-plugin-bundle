@@ -12,20 +12,18 @@ import { basename, join } from 'node:path';
 import { LlmError } from '@deepseek-ai/dsh-llm';
 import { AcpProcess } from "./acp-process.js";
 import { applyModelAndEffort, detachBridge, freshReanswer, historyPrefixIntact, isOwnMessage, MAIN_PURPOSE, mountBridge, pendingInput, permissionState, planPrompt, } from "./acp-session.js";
-import { AccountPool, accountProfileOf, accountVisibleModels, buildLayouts, ensureLayout, familyForModel, loginCommand, pluginHome, proxyUrlFromEnv, readAccountEmail, SYSTEM_ACCOUNT_ID, TRANSIENT_COOLDOWN_MS, } from "./accounts.js";
-import { ModelCatalog, intersectVisible, isListedModel, nearestEffort } from "./catalog.js";
+import { accountRemark, buildSystemLayout, ensureLayout, SYSTEM_ACCOUNT_ID, } from "./accounts.js";
+import { ModelCatalog, isListedModel, nearestEffort } from "./catalog.js";
 import { asEffort, current } from "./config.js";
 import { AcpTurn, AWAIT_TOOL, AWAIT_TOOL_NAME, CALL_TOOL, CALL_TOOL_NAME, degradedExhaustedError, degradedRouteError, isReanswerFailure, pumpStep, relayNotice } from "./conversation.js";
-import { unlockAccountKeychain } from "./credential.js";
 import { AGENT_TOOL_PREFIX, inputPrompt, LOCKED_REPLAY_BUDGET_BYTES, renderFullToolContracts, renderTranscript, replayPrompt, splitSystem, UNLOCKED_REPLAY_BUDGET_BYTES, } from "./history.js";
 import { labeled } from "./labels.js";
 import { JsonRpcClosedError, JsonRpcRemoteError } from "./jsonrpc.js";
 import { McpBridge } from "./mcp-bridge.js";
-import { assertSupportedAgyVersion, BRIDGE_AGENT, checkUnlock, defaultPatchScript, GPT_OSS_CONTEXT_WINDOW, LOCKED_CONTEXT_WINDOW, readVersion, resolveAgyBinary, syncOAuthToken, UNLOCKED_CONTEXT_WINDOW, } from "./preflight.js";
-import { groupForModel, isWeeklyBucket, QuotaReader, resolveModelQuota } from "./quota.js";
+import { assertSupportedAgyVersion, BRIDGE_AGENT, checkUnlock, defaultPatchScript, GPT_OSS_CONTEXT_WINDOW, LOCKED_CONTEXT_WINDOW, readVersion, resolveAgyBinary, UNLOCKED_CONTEXT_WINDOW, } from "./preflight.js";
 import { RouteHealth } from "./route-health.js";
 import { SessionStore } from "./session-store.js";
-import { newSlot, rebaseSlot, slotDeniesModel, slotDisablesModel } from "./slots.js";
+import { newSlot } from "./slots.js";
 import { answerPermission as decidePermission, consumeToolDelta, resolveActiveToolSchemas, toBridgeTools, MAX_EAGER_BRIDGE_TOOL_BYTES, } from "./tool-bridge.js";
 import { hasGenMetadata, peekMaxGenMetadataIdx, peekMaxModelStepIdx, readGenUsageAfter, readModelStepTail, readModelStepsAfter, sessionDbPath, } from "./usage-db.js";
 import { delay, digest, KeyedMutex } from "./util.js";
@@ -35,8 +33,6 @@ export { compactBridgeTool, consumeToolDelta, MAX_EAGER_BRIDGE_TOOL_BYTES, resol
 export const DEFAULT_RELAY_AFTER_MS = 85_000;
 /** Automatic re-answers granted for one identical request before a degraded answer is delivered as it is. */
 const MAX_REANSWERS_PER_REQUEST = 2;
-/** Failure text of a provider whose account list is empty, which only the settings page can fix. */
-const NO_ACCOUNT_MESSAGE = '没有可用的 Antigravity 账号，请在设置页添加账号或使用本机登录。';
 const CONTINUE_PROMPT = 'Continue exactly where your previous output stopped. Do not repeat any earlier text.';
 const REROLL_CONTINUATION_PROMPT = '[HARNESS_NOTICE] Your previous attempt was discarded before reaching the user because upstream routed it to a degraded fallback node without executing any tools. Disregard any prior unexecuted draft, inspect the full context and workspace with your tools as needed, and complete my latest request above from scratch.';
 /** Owner of the ACP processes, the MCP bridge, and every conversation. */
@@ -44,14 +40,10 @@ export class AntigravityRuntime {
     host;
     bridge;
     catalog;
-    quota;
     /** Gemini home of the account that owns the shared model catalog. */
     primaryHome;
     sessions;
-    pool;
     slots = new Map();
-    logins = new Map();
-    binary;
     lastError;
     lastAccount;
     conversations = new Map();
@@ -70,16 +62,9 @@ export class AntigravityRuntime {
     /** @param host - host services. */
     constructor(host) {
         this.host = host;
-        const layouts = this.resolveLayouts(host.config);
-        this.pool = new AccountPool(layouts);
-        for (const layout of layouts) {
-            this.slots.set(layout.id, newSlot(layout));
-        }
-        // The plugin's own data (session index, catalog cache) lives in the primary
-        // account's directory when there is one. A provider with no account at all
-        // keeps it under the plugin home, so a list the user emptied still boots and
-        // can gain an account from the settings page afterwards.
-        this.primaryHome = (this.pool.get(SYSTEM_ACCOUNT_ID) ?? layouts[0])?.geminiDir ?? pluginHome(host.config.home);
+        const layout = buildSystemLayout({ home: host.config.home, remark: current(host.config.accountLabel) });
+        this.slots.set(SYSTEM_ACCOUNT_ID, newSlot(layout));
+        this.primaryHome = layout.geminiDir;
         this.sessions = new SessionStore(join(this.primaryHome, 'session-index.json'));
         this.catalog = new ModelCatalog(join(this.primaryHome, 'catalog.json'));
         this.catalog.applyVisibility(this.providerVisible());
@@ -88,8 +73,6 @@ export class AntigravityRuntime {
             callTool: request => this.callTool(request),
             authorize: (tenantKey, bearerToken) => this.authorizeTenant(tenantKey, bearerToken),
         }, { keepAliveMs: host.config.keepAliveMs, log: message => host.log.info(message) });
-        this.quota = new QuotaReader(() => this.binary, host.runCommand, host.config.quotaTtlMs);
-        void this.refreshAccountEmails();
         this.sweeper = setInterval(() => this.sweep(), 60_000);
         this.sweeper.unref?.();
     }
@@ -119,23 +102,6 @@ export class AntigravityRuntime {
             issuedIds: [...conv.issuedIds],
         });
     }
-    /**
-     * Build the account layouts, degrading to the machine account when the
-     * declared list is malformed: one bad entry must not take the provider down.
-     */
-    resolveLayouts(config) {
-        const accounts = this.overrides.accounts ?? current(config.accounts) ?? [];
-        try {
-            return buildLayouts({ home: config.home, accounts });
-        }
-        catch (error) {
-            this.host.log.warn(`antigravity-acp: ${error instanceof Error ? error.message : String(error)}; falling back to the machine account only`);
-            return buildLayouts({
-                home: config.home,
-                accounts: [{ id: SYSTEM_ACCOUNT_ID, displayName: '', home: '', enabled: true, env: {}, contextWindow: 0, system: true, visibleModels: [] }],
-            });
-        }
-    }
     /** Configured context window (0 = auto). */
     configuredContextWindow() {
         return this.overrides.contextWindow ?? current(this.host.config.contextWindow);
@@ -159,12 +125,7 @@ export class AntigravityRuntime {
      * @returns tokens.
      */
     contextWindowFor(model) {
-        const fallback = this.baseContextWindow(model);
-        const candidates = this.pool.list().filter(layout => layout.enabled && this.servesModel(layout.id, model));
-        if (candidates.length === 0)
-            return fallback;
-        const windows = candidates.map(layout => layout.contextWindow > 0 ? Math.min(layout.contextWindow, fallback) : fallback);
-        return Math.min(...windows);
+        return this.baseContextWindow(model);
     }
     baseContextWindow(model) {
         const configured = this.configuredContextWindow();
@@ -199,38 +160,11 @@ export class AntigravityRuntime {
     }
     /** Provider-level model allowlist; empty offers every advertised family. */
     providerVisible() {
-        return accountVisibleModels(this.overrides.visibleModels ?? current(this.host.config.visibleModels));
+        return [...(this.overrides.visibleModels ?? current(this.host.config.visibleModels) ?? [])];
     }
-    /**
-     * Model ids one account may serve.
-     * @param accountId - account key, or undefined for the provider ceiling.
-     * @returns the effective ids; empty means every advertised family.
-     */
-    effectiveVisible(accountId) {
-        const provider = this.providerVisible();
-        if (accountId === undefined)
-            return provider;
-        const layout = this.slots.get(accountId)?.layout;
-        if (layout === undefined)
-            return provider;
-        return intersectVisible(provider, accountVisibleModels(layout.visibleModels));
-    }
-    /**
-     * Whether an account may serve one family.
-     * @param accountId - account key, or undefined for the provider ceiling.
-     * @param model - family id.
-     * @returns true when the provider and the account both offer it.
-     */
+    /** Only the system account and provider allowlist can serve a model. */
     servesModel(accountId, model) {
-        const provider = this.providerVisible();
-        if (!isListedModel(model, provider))
-            return false;
-        if (accountId === undefined)
-            return true;
-        const layout = this.slots.get(accountId)?.layout;
-        if (layout === undefined)
-            return true;
-        return isListedModel(model, accountVisibleModels(layout.visibleModels));
+        return (accountId === undefined || accountId === SYSTEM_ACCOUNT_ID) && isListedModel(model, this.providerVisible());
     }
     /**
      * Apply live runtime settings immediately and notify catalog observers.
@@ -238,143 +172,17 @@ export class AntigravityRuntime {
      * @returns updated status.
      */
     configure(patch) {
-        const next = { ...patch };
-        if (next.visibleModels !== undefined)
-            next.visibleModels = accountVisibleModels(next.visibleModels);
-        let accounts = next.accounts;
-        if (accounts !== undefined) {
-            const declared = accounts;
-            // Re-resolve through the layouts so auto-assigned ids and normalized
-            // remarks are what gets stored, and the machine entry keeps `system`.
-            accounts = buildLayouts({ home: this.host.config.home, accounts: declared }).map((layout, index) => accountProfileOf(layout, layout.system ? declared[index]?.displayName : undefined));
-        }
-        this.overrides = { ...this.overrides, ...next, ...accounts !== undefined ? { accounts } : {} };
-        if (next.accounts !== undefined)
-            this.applyAccounts();
-        if (next.visibleModels !== undefined)
+        this.overrides = { ...this.overrides, ...patch };
+        if (patch.accountLabel !== undefined)
+            this.overrides.accountLabel = accountRemark(patch.accountLabel);
+        if (patch.visibleModels !== undefined)
             this.catalog.applyVisibility(this.providerVisible());
         this.host.onModelsChanged();
         return this.status();
     }
-    applyAccounts() {
-        const layouts = this.resolveLayouts(this.host.config);
-        this.pool.sync(layouts);
-        const live = new Set(layouts.map(layout => layout.id));
-        for (const [id, slot] of [...this.slots]) {
-            if (live.has(id))
-                continue;
-            for (const conv of this.conversations.values()) {
-                if (conv.accountId !== id)
-                    continue;
-                void this.resetSession(conv);
-                conv.accountId = undefined;
-            }
-            slot.process?.stop();
-            this.slots.delete(id);
-        }
-        for (const layout of layouts) {
-            const slot = this.slots.get(layout.id);
-            if (slot === undefined) {
-                this.slots.set(layout.id, newSlot(layout));
-                continue;
-            }
-            if (rebaseSlot(slot, layout) && slot.process !== undefined) {
-                slot.process.stop();
-                slot.process = undefined;
-                slot.starting = undefined;
-                slot.state = 'idle';
-            }
-        }
-        this.quota.clear();
-        this.recomputeUnionCatalog();
-        void this.refreshAccountEmails();
-    }
-    applyQuotaToSlot(slot, snapshot) {
-        if (snapshot.subscriptionTier !== undefined)
-            slot.subscriptionTier = snapshot.subscriptionTier;
-        if (snapshot.subscriptionName !== undefined)
-            slot.subscriptionName = snapshot.subscriptionName;
-        if (snapshot.disabledModels !== undefined)
-            slot.disabledModels = [...snapshot.disabledModels];
-        if (snapshot.effortsByModel !== undefined)
-            slot.effortsByModel = { ...snapshot.effortsByModel };
-        if (snapshot.maxTokensByModel !== undefined)
-            slot.maxTokensByModel = { ...snapshot.maxTokensByModel };
-        if (snapshot.availableModels !== undefined && snapshot.availableModels.length > 0) {
-            slot.availableModels = snapshot.availableModels.map(m => ({ ...m }));
-        }
-        for (const group of snapshot.groups) {
-            const weekly = group.buckets.find(b => isWeeklyBucket(b) && !b.disabled);
-            if (weekly !== undefined && weekly.remainingFraction <= 0.005 && weekly.resetTime.length > 0) {
-                const key = group.kind === 'argon'
-                    ? 'argon'
-                    : (group.kind === 'claude' ? 'claude' : 'gemini');
-                this.pool.exhaustFor(slot.layout.id, key, weekly.resetTime);
-                if (key === 'claude')
-                    this.pool.exhaustFor(slot.layout.id, 'gpt-oss', weekly.resetTime);
-            }
-        }
-        if (this.recomputeUnionCatalog())
+    observeSlotCatalog(_slot, options, available) {
+        if (this.catalog.observe(options, available, this.providerVisible()))
             this.host.onModelsChanged();
-    }
-    recomputeUnionCatalog() {
-        const inventories = [];
-        const effortsByModel = {};
-        const maxTokensByModel = {};
-        for (const slot of this.slots.values()) {
-            if (!slot.layout.enabled || slot.availableModels === undefined || slot.availableModels.length === 0)
-                continue;
-            inventories.push(slot.availableModels);
-            for (const [id, efforts] of Object.entries(slot.effortsByModel ?? {})) {
-                if (effortsByModel[id] === undefined || efforts.length > effortsByModel[id].length) {
-                    effortsByModel[id] = [...efforts];
-                }
-            }
-            for (const [id, maxTokens] of Object.entries(slot.maxTokensByModel ?? {})) {
-                maxTokensByModel[id] = Math.max(maxTokensByModel[id] ?? 0, maxTokens);
-            }
-        }
-        if (inventories.length === 0)
-            return false;
-        return this.catalog.mergeAccountInventories(inventories, effortsByModel, maxTokensByModel, this.providerVisible());
-    }
-    observeSlotCatalog(slot, options, available) {
-        const modelOption = options?.find(o => o.id === 'model' || o.category === 'model');
-        if (modelOption?.options !== undefined && modelOption.options.length > 0) {
-            slot.availableModels = modelOption.options.map(o => ({ id: o.value, name: o.name ?? o.value }));
-            if (available !== undefined && available.length > 0) {
-                const map = { ...(slot.effortsByModel ?? {}) };
-                for (const model of slot.availableModels) {
-                    const offered = ['low', 'medium', 'high'].filter(e => available.some(a => a.modelId === `${model.id}-${e}`));
-                    map[model.id] = [...offered];
-                }
-                slot.effortsByModel = map;
-            }
-            if (this.recomputeUnionCatalog()) {
-                this.host.onModelsChanged();
-                return;
-            }
-        }
-        if (this.catalog.observe(options, available, this.providerVisible())) {
-            this.host.onModelsChanged();
-        }
-    }
-    /**
-     * Read the stored email and upstream Cloud Code tier/catalog/quota of every
-     * configured account so newly added or restarted slots display their real
-     * subscription tier and entitled models immediately.
-     */
-    async refreshAccountEmails() {
-        await Promise.all([...this.slots.values()].map(async (slot) => {
-            const email = await readAccountEmail(slot.layout, this.host.runCommand).catch(() => undefined);
-            slot.email = email;
-            if (email !== undefined && email.length > 0) {
-                const snap = await this.quota.readFor(slot.layout.id, slot.env, false, slot.layout).catch(() => undefined);
-                if (snap !== undefined && snap.status === 'ok') {
-                    this.applyQuotaToSlot(slot, snap);
-                }
-            }
-        }));
     }
     primaryPreflight() {
         for (const slot of this.slots.values())
@@ -418,7 +226,7 @@ export class AntigravityRuntime {
             efforts: [...this.catalog.effortList()],
             liveSessions: [...this.conversations.values()].filter(c => c.sessionId !== undefined).length,
             activeTurns: [...this.conversations.values()].filter(c => c.turn !== undefined && !c.turn.finished).length,
-            accounts: this.accounts(),
+            accountLabel: this.overrides.accountLabel ?? current(this.host.config.accountLabel) ?? '',
             ...this.lastAccount !== undefined ? { lastAccount: this.lastAccount } : {},
             ...this.lastTurn !== undefined ? { lastTurn: this.lastTurn } : {},
             ...Object.keys(sessionHealth).length > 0 ? { sessionHealth } : {},
@@ -445,212 +253,6 @@ export class AntigravityRuntime {
         return out;
     }
     /**
-     * Plan quota of one account, read through that account's own credential store.
-     * @param accountId - account to read; defaults to the account that served the last step.
-     * @param force - bypass the cache.
-     * @returns the quota snapshot.
-     */
-    async quotaFor(accountId, force = false) {
-        const id = accountId ?? this.lastAccount ?? SYSTEM_ACCOUNT_ID;
-        const slot = this.slots.get(id);
-        if (this.binary === undefined) {
-            const target = slot ?? this.slots.get(SYSTEM_ACCOUNT_ID) ?? [...this.slots.values()][0];
-            if (target !== undefined)
-                await this.runPreflightSlot(target).catch(() => undefined);
-        }
-        if (slot === undefined)
-            return this.quota.read(force);
-        if (!slot.layout.system && process.platform === 'darwin')
-            await unlockAccountKeychain(slot.layout, this.host.runCommand);
-        const snapshot = await this.quota.readFor(id, slot.env, force, slot.layout);
-        if (snapshot.status === 'ok')
-            this.applyQuotaToSlot(slot, snapshot);
-        return snapshot;
-    }
-    /**
-     * Plan quota of the account that serves one model right now.
-     *
-     * A surface that reads "the account that served the last step" hands a model
-     * another account's numbers: a Pro account that just ran a Flash turn lends
-     * its untouched Gemini window to Argon, which that plan cannot spend at all.
-     * Resolving the account with the scheduler's own rule keeps the number and
-     * the model on one subscription, and the echoed `model` lets a caller drop an
-     * answer that arrived after the user switched models.
-     * @param model - model asked about.
-     * @param force - bypass the cache.
-     * @param sessionId - DSH session whose bound account should be preferred, so
-     * the number belongs to the account this conversation actually spends.
-     * @returns the snapshot plus the resolved account and the governing windows.
-     */
-    async quotaForModel(model, force = false, sessionId) {
-        const layout = this.accountForModel(model, sessionId);
-        if (layout === undefined) {
-            const snapshot = await this.quota.read(force);
-            return { ...snapshot, model, focus: resolveModelQuota(snapshot, model) };
-        }
-        const snapshot = this.withSlotEntitlements(layout.id, await this.quotaFor(layout.id, force));
-        return {
-            ...snapshot,
-            accountId: layout.id,
-            accountLabel: this.accountLabel(layout),
-            model,
-            focus: resolveModelQuota(snapshot, model),
-        };
-    }
-    /**
-     * Fold the entitlements the ACP front already reported into a CLI-read
-     * snapshot, which carries windows only. Without this a Pro account whose
-     * Argon is disabled upstream would look merely unlisted instead of denied.
-     * @param accountId - account the snapshot belongs to.
-     * @param snapshot - windows read through the account's credential store.
-     * @returns the snapshot with the account's known entitlements filled in.
-     */
-    withSlotEntitlements(accountId, snapshot) {
-        const slot = this.slots.get(accountId);
-        if (slot === undefined)
-            return snapshot;
-        const merged = { ...snapshot };
-        if ((merged.availableModels === undefined || merged.availableModels.length === 0)
-            && slot.availableModels !== undefined && slot.availableModels.length > 0) {
-            merged.availableModels = slot.availableModels;
-        }
-        if (merged.disabledModels === undefined && slot.disabledModels !== undefined)
-            merged.disabledModels = [...slot.disabledModels];
-        if (merged.subscriptionTier === undefined && slot.subscriptionTier !== undefined)
-            merged.subscriptionTier = slot.subscriptionTier;
-        if (merged.subscriptionName === undefined && slot.subscriptionName !== undefined)
-            merged.subscriptionName = slot.subscriptionName;
-        if (merged.argonSharedWithGemini === undefined && slot.subscriptionTier === 'ULTRA')
-            merged.argonSharedWithGemini = true;
-        return merged;
-    }
-    /**
-     * Account the scheduler would spend one model on, without reserving anything.
-     * Preference order: an account that does not deny the model, then the
-     * scheduler's own pick, then the best owner of the family when every
-     * candidate is parked (its exhausted window is exactly what a person wants to
-     * see), then any enabled account of the family.
-     * @param model - model asked about.
-     * @param sessionId - DSH session that owns the conversation being described.
-     * @returns the account layout, or undefined when no account serves the model.
-     */
-    accountForModel(model, sessionId) {
-        const family = familyForModel(model);
-        const now = Date.now();
-        // The session that already ran keeps its account, so the number belongs to
-        // the subscription this conversation actually spends; a fresh conversation
-        // follows the pool's own pick.
-        const sticky = this.sessionAccount(sessionId) ?? this.lastAccount;
-        // Attribution first: an account whose own announced catalog omits the model
-        // cannot spend it, even before any other account has announced it — the
-        // state right after a restart, or before the first warm-up. Scheduling stays
-        // as tolerant as before; only what the pill reports is resolved here.
-        const undenying = this.pool.choose(family, sticky, now, layout => !this.accountDeniesModel(layout.id, model) && this.slotCanServeModel(layout.id, model, now));
-        if (undenying !== undefined)
-            return undenying;
-        const ready = this.pool.choose(family, sticky, now, layout => this.slotCanServeModel(layout.id, model, now));
-        if (ready !== undefined)
-            return ready;
-        const parked = this.pool.choose(family, sticky, now);
-        if (parked !== undefined)
-            return parked;
-        return this.pool.list().find(layout => layout.enabled && this.servesModel(layout.id, model));
-    }
-    /**
-     * Account bound to the main conversation of one DSH session, when it has
-     * already run a step.
-     * @param sessionId - DSH session id.
-     * @returns the account key, or undefined before the first step.
-     */
-    sessionAccount(sessionId) {
-        if (sessionId === undefined || sessionId.length === 0)
-            return undefined;
-        for (const conv of this.conversations.values()) {
-            if (conv.dshSessionId === sessionId && conv.purpose === MAIN_PURPOSE && conv.accountId !== undefined)
-                return conv.accountId;
-        }
-        return undefined;
-    }
-    /**
-     * Whether one account's own report rules out a model: it is in the announced
-     * catalogue without the model, or upstream marked it disabled.
-     * @param accountId - account key.
-     * @param model - model asked about.
-     * @returns true when the account positively cannot serve the model.
-     */
-    accountDeniesModel(accountId, model) {
-        const slot = this.slots.get(accountId);
-        if (slot === undefined)
-            return false;
-        return slotDeniesModel(slot, model);
-    }
-    /**
-     * Human-readable attribution of one account: remark, then address, then key.
-     * @param layout - account layout.
-     * @returns the label a surface can show beside a quota number.
-     */
-    accountLabel(layout) {
-        const remark = layout.label.trim();
-        if (remark.length > 0)
-            return remark;
-        const email = this.slots.get(layout.id)?.email;
-        if (email !== undefined && email.length > 0)
-            return email;
-        return layout.id;
-    }
-    /**
-     * Every configured account with its live process state, cooldowns, and sign-in.
-     * @returns one row per account in configured order.
-     */
-    accounts() {
-        const sessions = new Map();
-        for (const conv of this.conversations.values()) {
-            if (conv.sessionId === undefined || conv.accountId === undefined)
-                continue;
-            sessions.set(conv.accountId, (sessions.get(conv.accountId) ?? 0) + 1);
-        }
-        return this.pool.list().map((layout) => {
-            const slot = this.slots.get(layout.id);
-            const ownAllow = accountVisibleModels(layout.visibleModels);
-            const slotCatalog = slot?.availableModels ?? this.catalog.availableModels().map(m => ({ id: m.id, name: m.name }));
-            const accountAvailable = slotCatalog.map(m => ({
-                id: m.id,
-                name: m.name,
-                enabled: isListedModel(m.id, ownAllow),
-            }));
-            return {
-                id: layout.id,
-                label: layout.label,
-                system: layout.system,
-                enabled: layout.enabled,
-                root: layout.root,
-                home: layout.declaredHome,
-                env: { ...layout.env },
-                homeDir: layout.homeDir,
-                geminiDir: layout.geminiDir,
-                state: slot?.state ?? 'idle',
-                error: slot?.error ?? undefined,
-                cooldowns: this.pool.cooldowns(layout.id),
-                sessions: sessions.get(layout.id) ?? 0,
-                email: slot?.email ?? undefined,
-                ...(slot?.subscriptionTier !== undefined ? { subscriptionTier: slot.subscriptionTier } : {}),
-                ...(slot?.subscriptionName !== undefined ? { subscriptionName: slot.subscriptionName } : {}),
-                availableModels: accountAvailable,
-                ...(slot?.disabledModels !== undefined && slot.disabledModels.length > 0 ? { disabledModels: [...slot.disabledModels] } : {}),
-                contextWindow: layout.contextWindow,
-                visibleModels: [...layout.visibleModels],
-                priority: layout.priority,
-                weight: layout.weight,
-                proxyUrl: proxyUrlFromEnv(layout.env),
-                usage: {
-                    inputTokens: slot?.usage.inputTokens ?? 0,
-                    outputTokens: slot?.usage.outputTokens ?? 0,
-                    totalTokens: slot?.usage.totalTokens ?? 0,
-                },
-            };
-        });
-    }
-    /**
      * Run preflight and start one account's ACP front.
      * @param accountId - account to start; defaults to the first enabled one.
      * @returns the running process.
@@ -669,8 +271,7 @@ export class AntigravityRuntime {
     }
     defaultSlot() {
         for (const slot of this.slots.values())
-            if (slot.layout.enabled)
-                return slot;
+            return slot;
         throw new LlmError(labeled('AUTH', 'No enabled Antigravity account is configured'), 'AUTH');
     }
     async ensureSlotReady(slot) {
@@ -681,40 +282,9 @@ export class AntigravityRuntime {
         slot.starting ??= this.startSlot(slot).finally(() => { slot.starting = undefined; });
         return slot.starting;
     }
-    /**
-     * Warm one or all accounts and refresh their per-account catalogs.
-     * @param accountId - optional single account to refresh.
-     * @returns resolves when discovery finished.
-     */
-    async warmup(accountId) {
-        // Nothing to discover while the account list is empty; the provider stays
-        // idle until the settings page adds an account.
-        if (this.pool.list().length === 0)
-            return;
-        if (accountId !== undefined) {
-            const target = this.slotFor(accountId);
-            target.email = await readAccountEmail(target.layout, this.host.runCommand).catch(() => undefined);
-            if (target.email !== undefined && target.email.length > 0) {
-                const snap = await this.quotaFor(target.layout.id, true);
-                if (snap.status === 'ok' && snap.availableModels !== undefined && snap.availableModels.length > 0) {
-                    this.lastError = undefined;
-                    return;
-                }
-            }
-            await this.warmupSlotViaAcp(target);
-            return;
-        }
-        await this.refreshAccountEmails();
-        const signedIn = [...this.slots.values()].filter(c => c.layout.enabled && typeof c.email === 'string' && c.email.length > 0);
-        if (signedIn.length > 0) {
-            const snapshots = await Promise.all(signedIn.map(s => this.quotaFor(s.layout.id, true).catch(() => undefined)));
-            if (snapshots.some(s => s !== undefined && s.status === 'ok' && s.availableModels !== undefined && s.availableModels.length > 0)) {
-                this.lastError = undefined;
-                return;
-            }
-        }
-        const slot = signedIn[0] ?? this.defaultSlot();
-        await this.warmupSlotViaAcp(slot);
+    /** Discover models only through the ACP session response. */
+    async warmup() {
+        await this.warmupSlotViaAcp(this.defaultSlot());
     }
     async warmupSlotViaAcp(slot) {
         try {
@@ -737,9 +307,6 @@ export class AntigravityRuntime {
         this.disposed = true;
         if (this.sweeper !== undefined)
             clearInterval(this.sweeper);
-        for (const session of this.logins.values())
-            session.child.terminate();
-        this.logins.clear();
         for (const conv of this.conversations.values()) {
             if (conv.turn === undefined)
                 this.persistConversation(conv);
@@ -764,136 +331,31 @@ export class AntigravityRuntime {
         slot.usage.outputTokens += output;
         slot.usage.totalTokens += Math.max(0, Math.round(usage.totalTokens ?? input + output));
     }
-    slotCanServeModel(accountId, model, now = Date.now()) {
-        if (!this.servesModel(accountId, model))
-            return false;
-        if (/argon/i.test(model) && this.pool.cooldownMs(accountId, 'argon', now) > 0)
-            return false;
-        const slot = this.slots.get(accountId);
-        if (slot === undefined)
-            return true;
-        if (slotDisablesModel(slot, model)) {
-            return false;
-        }
-        if (slot.availableModels !== undefined && slot.availableModels.length > 0) {
-            const anySlotListsModel = [...this.slots.values()].some(s => s.availableModels?.some(m => m.id === model) === true);
-            if (anySlotListsModel && !slot.availableModels.some(m => m.id === model)) {
-                return false;
-            }
-        }
-        const cachedQuota = this.quota.peekFor(accountId);
-        if (cachedQuota?.status === 'ok' && cachedQuota.groups.length > 0) {
-            const group = groupForModel(cachedQuota.groups, model);
-            const weekly = group?.buckets.find(b => isWeeklyBucket(b) && !b.disabled);
-            if (weekly !== undefined && weekly.remainingFraction <= 0.005) {
-                const resetMs = Date.parse(weekly.resetTime);
-                if (!Number.isFinite(resetMs) || resetMs > now)
-                    return false;
-            }
-        }
-        return true;
-    }
-    /**
-     * Stream one model step, failing over to another enabled account when the
-     * chosen account hits a quota window or lacks model entitlement before any output is emitted.
-     * @param options - the model request.
-     * @yields stream chunks.
-     */
+    /** Stream on the sole system account; the harness owns finite retries. */
     async *stream(options) {
         if (options.signal?.aborted === true) {
             yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'Request aborted', code: 'ABORTED' } } };
             return;
-        }
-        // An empty account list is a configuration the user can repair in one step
-        // from the settings page, so it reports as a sign-in failure instead of
-        // surfacing as a quota exhaustion with no account rows.
-        if (!this.pool.list().some(layout => layout.enabled)) {
-            throw new LlmError(labeled('AUTH', NO_ACCOUNT_MESSAGE), 'AUTH');
         }
         const declaredPurpose = options.purpose;
         const purpose = declaredPurpose !== undefined && declaredPurpose.length > 0 ? declaredPurpose : MAIN_PURPOSE;
         const scope = options.sessionId ?? `anon-${randomBytes(6).toString('hex')}`;
         const key = `${scope}|${purpose}`;
         const release = await this.mutex.acquire(key);
-        const family = familyForModel(options.model);
-        const cooldownKey = /argon/i.test(options.model) ? 'argon' : family;
-        const attempted = new Set();
         let conv;
-        let emitted = false;
         try {
             conv = await this.acquireConversation(key, purpose, options.sessionId);
             conv.lastUsed = Date.now();
-            for (;;) {
-                const now = Date.now();
-                const liveByAccount = new Map();
-                for (const c of this.conversations.values()) {
-                    if (c.sessionId !== undefined && c.accountId !== undefined) {
-                        liveByAccount.set(c.accountId, (liveByAccount.get(c.accountId) ?? 0) + 1);
-                    }
-                }
-                const layout = this.pool.choose(family, conv.accountId, now, candidate => !attempted.has(candidate.id) && this.slotCanServeModel(candidate.id, options.model, now), id => liveByAccount.get(id) ?? 0);
-                if (layout === undefined)
-                    throw this.poolExhausted(family, attempted, options.model, cooldownKey);
-                const slot = this.slotFor(layout.id);
-                try {
-                    for await (const chunk of this.attempt(conv, slot, options)) {
-                        emitted = true;
-                        yield chunk;
-                    }
-                    return;
-                }
-                catch (error) {
-                    if (emitted || attempted.has(layout.id))
-                        throw error;
-                    if (isUnknownModelFailure(error)) {
-                        slot.disabledModels = [...new Set([...(slot.disabledModels ?? []), options.model])];
-                        await this.failover(conv, slot, options.model, attempted, {
-                            reject: () => error,
-                            log: `antigravity-acp: account "${layout.id}" is not entitled to ${options.model}; failing over to another account`,
-                            reason: 'The account serving this conversation does not offer the requested model.',
-                        });
-                        continue;
-                    }
-                    // Degraded-route failures ask the harness retry layer for the identical
-                    // request instead of upstream quota: they must never cool an account
-                    // down, park one, or fail the step over to another account.
-                    if (isReanswerFailure(error))
-                        throw error;
-                    const code = failureCode(error);
-                    if (code === 'RATE_LIMIT') {
-                        // Upstream overload, not an exhausted window: cool the account for
-                        // the stated delay and fail over when someone else can serve the
-                        // model; with no other account, rethrow so the harness retry layer
-                        // asks upstream again instead of burning a whole family window.
-                        const message = error instanceof Error ? error.message : String(error);
-                        const retryAfterMs = retryAfterMsFromError(error);
-                        await this.failover(conv, slot, options.model, attempted, {
-                            reject: () => new LlmError(message, 'RATE_LIMIT', {
-                                cause: error,
-                                ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
-                            }),
-                            cool: () => {
-                                const transientKey = cooldownKey === 'argon' && slot.subscriptionTier !== 'ULTRA' ? 'argon' : family;
-                                this.pool.exhaust(layout.id, transientKey, Date.now() + (retryAfterMs ?? TRANSIENT_COOLDOWN_MS), message);
-                            },
-                            log: `antigravity-acp: account "${layout.id}" is briefly rate limited on ${options.model} (${message}); cooling down and moving to the next account`,
-                            reason: 'The account serving this conversation is briefly rate limited.',
-                        });
-                        continue;
-                    }
-                    if (!isQuotaFailure(error))
-                        throw error;
-                    const message = error instanceof Error ? error.message : String(error);
-                    await this.failover(conv, slot, options.model, attempted, {
-                        cool: () => {
-                            const parkKey = cooldownKey === 'argon' && slot.subscriptionTier !== 'ULTRA' ? 'argon' : family;
-                            this.pool.exhaustFor(layout.id, parkKey, resetTimeFromError(error), message);
-                        },
-                        log: `antigravity-acp: account "${layout.id}" cannot serve ${options.model} (${message}); moving to the next account`,
-                        reason: 'The account serving this conversation ran out of quota.',
-                    });
-                }
+            for await (const chunk of this.attempt(conv, this.defaultSlot(), options))
+                yield chunk;
+        }
+        catch (error) {
+            if (failureCode(error) === 'RATE_LIMIT') {
+                const message = error instanceof Error ? error.message : String(error);
+                const retryAfterMs = retryAfterMsFromError(error);
+                throw new LlmError(message, 'RATE_LIMIT', { cause: error, ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs } });
             }
+            throw mapError(error);
         }
         finally {
             release();
@@ -903,45 +365,11 @@ export class AntigravityRuntime {
             }
         }
     }
-    /**
-     * Move one failed step to the next account: record the failure on the account
-     * that served it, then reset the conversation so the retry opens a fresh ACP
-     * session elsewhere.
-     * @param conv - the conversation being served.
-     * @param slot - the account whose attempt failed.
-     * @param model - requested model id.
-     * @param attempted - accounts already tried in this step.
-     * @param outcome.reject - builds the error rethrown when no other account can serve the step; omitted when the account is parked unconditionally.
-     * @param outcome.cool - records this account's own cooldown; omitted when the failure already marked the account (a model denial).
-     * @param outcome.log - warning line for the server log.
-     * @param outcome.reason - why the abandoned turn was dropped.
-     */
-    async failover(conv, slot, model, attempted, outcome) {
-        if (outcome.reject !== undefined && !this.hasAnotherAccount(slot.layout.id, attempted, model))
-            throw outcome.reject();
-        attempted.add(slot.layout.id);
-        outcome.cool?.();
-        this.host.log.warn(outcome.log);
-        this.dropTurn(conv, outcome.reason);
-        await this.resetSession(conv);
-        conv.accountId = undefined;
-    }
-    /**
-     * Whether an account other than the failed one could still serve this step.
-     * @param accountId - account whose attempt failed.
-     * @param attempted - accounts already tried in this step.
-     * @param model - requested model id.
-     * @returns true when one enabled, untried account can serve the model now.
-     */
-    hasAnotherAccount(accountId, attempted, model) {
-        const now = Date.now();
-        return this.pool.list().some(c => c.enabled && c.id !== accountId && !attempted.has(c.id) && this.slotCanServeModel(c.id, model, now));
-    }
     /** One attempt of a step on one account; throws when that account cannot serve it. */
     async *attempt(conv, slot, options) {
         const proc = await this.ensureSlotReady(slot);
         if (conv.accountId !== slot.layout.id) {
-            this.dropTurn(conv, 'Rebuilding on another account.');
+            this.dropTurn(conv, 'Rebuilding the system-account session.');
             await this.resetSession(conv);
             conv.accountId = slot.layout.id;
         }
@@ -1022,7 +450,7 @@ export class AntigravityRuntime {
         if (conv.sessionId !== undefined)
             this.pinUsageCursors(conv, sessionDbPath(slot.layout.geminiDir, conv.sessionId));
         this.lastAccount = slot.layout.id;
-        this.pool.touch(slot.layout.id);
+        slot.readyAt = Date.now();
         this.startPrompt(conv, proc, blocks);
         yield* this.pump(conv, slot, proc, options, effort, { nextKnownIds });
     }
@@ -1073,7 +501,7 @@ export class AntigravityRuntime {
             blocks = [{ type: 'text', text: REROLL_CONTINUATION_PROMPT }];
         }
         this.lastAccount = slot.layout.id;
-        this.pool.touch(slot.layout.id);
+        slot.readyAt = Date.now();
         this.startPrompt(conv, proc, blocks);
         yield* this.pump(conv, slot, proc, options, effort, { nextKnownIds: messageIds(options.messages) });
     }
@@ -1142,32 +570,6 @@ export class AntigravityRuntime {
             this.host.log.info(`antigravity-acp: session/load unavailable for ${persisted.acpSessionId} (${error instanceof Error ? error.message : String(error)}); falling back to session/new`);
             return false;
         }
-    }
-    /** Explain why no account could serve a step, one line per account. */
-    poolExhausted(family, attempted, model, cooldownKey) {
-        const now = Date.now();
-        let retryAfterMs;
-        const rows = this.pool.list().map((layout) => {
-            const failed = attempted.has(layout.id) ? ' (failed this step)' : '';
-            if (!layout.enabled)
-                return `${layout.id} disabled${failed}`;
-            if (!this.servesModel(layout.id, model) || this.accountDeniesModel(layout.id, model)) {
-                return `${layout.id} not entitled to ${model}${failed}`;
-            }
-            const familyRemaining = this.pool.cooldownMs(layout.id, family, now);
-            const argonRemaining = cooldownKey === 'argon' || /argon/i.test(model) ? this.pool.cooldownMs(layout.id, 'argon', now) : 0;
-            const remaining = Math.max(familyRemaining, argonRemaining);
-            if (remaining <= 0)
-                return `${layout.id} unavailable${failed}`;
-            const parkedBucket = argonRemaining > familyRemaining ? 'argon' : family;
-            const reason = this.pool.cooldownReason(layout.id, parkedBucket, now);
-            const detail = reason === undefined || reason.length === 0 ? '' : ` (last error: ${reason.slice(0, 160)})`;
-            const parked = `${layout.id} parked ${Math.ceil(remaining / 60_000)}m${detail}${failed}`;
-            retryAfterMs = retryAfterMs === undefined ? remaining : Math.min(retryAfterMs, remaining);
-            return parked;
-        });
-        const message = `No Antigravity account can serve ${model} right now: ${rows.length > 0 ? rows.join('; ') : 'none configured'}`;
-        return new LlmError(labeled('RATE_LIMIT', message), 'RATE_LIMIT', retryAfterMs === undefined ? undefined : { providerRetryAfterMs: retryAfterMs });
     }
     async acquireConversation(key, purpose, dshSessionId) {
         const existing = this.conversations.get(key);
@@ -1292,15 +694,12 @@ export class AntigravityRuntime {
         slot.preflightPromise ??= (async () => {
             const config = this.host.config;
             const binary = resolveAgyBinary(config.command);
-            this.binary = binary;
             const version = await readVersion(binary, this.host.runCommand);
             assertSupportedAgyVersion(version, binary);
             const script = config.patchScript.length > 0 ? config.patchScript : defaultPatchScript();
             const unlock = await checkUnlock(binary, script, config.autoPatch, this.host.runCommand);
             this.host.log.info(`antigravity-acp: [${slot.layout.id}] ${unlock.detail}`);
-            await ensureLayout(slot.layout, this.host.runCommand);
-            const email = await readAccountEmail(slot.layout, this.host.runCommand).catch(() => undefined);
-            slot.email = email;
+            ensureLayout(slot.layout);
             const result = {
                 binary,
                 version,
@@ -1356,7 +755,6 @@ export class AntigravityRuntime {
         }
     }
     async openSession(conv, slot, system, activeSchemas, tools, proc) {
-        syncOAuthToken(slot.layout.geminiDir, slot.layout.homeDir);
         conv.reportedToolCalls.clear();
         conv.advertisedTools = [...tools];
         conv.advertisedToolNames = new Set(tools.map(t => t.name));
@@ -1968,80 +1366,12 @@ export class AntigravityRuntime {
         for (const slot of this.slots.values()) {
             if (slot.process === undefined || busy.has(slot.layout.id))
                 continue;
-            if (now - Math.max(this.pool.lastUsed(slot.layout.id), slot.readyAt) < ttl)
+            if (now - slot.readyAt < ttl)
                 continue;
             slot.process.stop();
             slot.process = undefined;
             slot.state = 'idle';
         }
-    }
-    /**
-     * Prepare an account sandbox and start an interactive sign-in.
-     * @param accountId - account to sign in.
-     * @returns the authorization URL and a terminal command fallback.
-     */
-    async beginLogin(accountId) {
-        const slot = this.slotFor(accountId);
-        const binary = this.binary ?? resolveAgyBinary(this.host.config.command);
-        this.binary = binary;
-        await ensureLayout(slot.layout, this.host.runCommand);
-        const command = loginCommand(slot.layout, binary);
-        this.logins.get(accountId)?.child.terminate();
-        this.logins.delete(accountId);
-        const child = this.host.spawnAcp([binary, 'acp', '--login'], slot.layout.workspace, slot.env);
-        const url = await readLoginUrl(child, 45_000);
-        if (url.length === 0) {
-            child.terminate();
-            throw new LlmError(`Antigravity returned no sign-in URL for account "${accountId}". Run this in a terminal instead: ${command}`, 'AUTH');
-        }
-        void child.exited.then(() => { if (this.logins.get(accountId)?.child === child)
-            this.logins.delete(accountId); });
-        this.logins.set(accountId, { child, url });
-        return { accountId, url, command };
-    }
-    /**
-     * Finish an interactive sign-in with the authorization code from the browser.
-     * @param accountId - account being signed in.
-     * @param code - authorization code pasted from the browser.
-     * @returns whether the account now holds a credential.
-     */
-    async completeLogin(accountId, code) {
-        const session = this.logins.get(accountId);
-        if (session === undefined)
-            return { ok: false, email: undefined, error: 'No sign-in is pending for this account.' };
-        const slot = this.slotFor(accountId);
-        session.child.stdin.write(`${code.trim()}\n`);
-        const outcome = await Promise.race([session.child.exited, delay(120_000).then(() => 'timeout')]);
-        if (this.logins.get(accountId)?.child === session.child)
-            this.logins.delete(accountId);
-        if (outcome === 'timeout') {
-            session.child.terminate();
-            return { ok: false, email: undefined, error: 'The sign-in did not finish within 120 seconds.' };
-        }
-        let email = await readAccountEmail(slot.layout, this.host.runCommand).catch(() => undefined);
-        for (let attempt = 0; email === undefined && outcome.code === 0 && attempt < 3; attempt++) {
-            await delay(150);
-            email = await readAccountEmail(slot.layout, this.host.runCommand).catch(() => undefined);
-        }
-        slot.email = email;
-        this.quota.clear();
-        const ok = email !== undefined || outcome.code === 0;
-        return {
-            ok,
-            email,
-            error: ok ? undefined : `agy exited with code ${String(outcome.code)} ${session.child.stderrTail()}`.trim(),
-        };
-    }
-    /**
-     * Abandon a pending sign-in.
-     * @param accountId - account whose sign-in should stop.
-     */
-    cancelLogin(accountId) {
-        const session = this.logins.get(accountId);
-        if (session === undefined)
-            return;
-        this.logins.delete(accountId);
-        session.child.terminate();
     }
     /**
      * Mint a fresh 48-bit hex turn tag (`agy_<tag>_<n>`) disjoint from every
@@ -2079,35 +1409,6 @@ function collectUsedTurnTags(messages, into) {
             }
         }
     }
-}
-async function readLoginUrl(child, timeoutMs) {
-    let buffer = '';
-    const match = () => /https:\/\/accounts\.google\.com\/[^\s"'<>]+/.exec(buffer)?.[0];
-    return new Promise((resolve) => {
-        const finish = () => {
-            clearTimeout(timer);
-            child.stdout.off('data', onData);
-            resolve(match() ?? '');
-        };
-        const onData = (chunk) => {
-            buffer += chunk.toString();
-            if (match() !== undefined)
-                finish();
-        };
-        const timer = setTimeout(finish, timeoutMs);
-        child.stdout.on('data', onData);
-        void child.exited.then(finish, finish);
-    });
-}
-function isUnknownModelFailure(error) {
-    return error?.code === 'UNKNOWN_MODEL';
-}
-function isQuotaFailure(error) {
-    const code = error?.code;
-    if (code === 'QUOTA' || code === 'RATE_LIMIT')
-        return true;
-    const message = error instanceof Error ? error.message : String(error);
-    return /quota|resource.?exhausted|limit reached|exceeded your|rate.?limit|429|too many requests/i.test(message);
 }
 /**
  * Identity of one model request: its message ids, system digest, model, and
@@ -2166,20 +1467,6 @@ function retryAfterMsFromError(error) {
     }
     const relative = /(?:retry|resets?)\s+(?:after|in)\s+((?:\d+(?:\.\d+)?[hms])+)/i.exec(message)?.[1];
     return relative === undefined ? undefined : parseDurationMs(relative);
-}
-/**
- * Reset time an error reports, as an ISO timestamp. A stated absolute reset
- * wins; a relative delay is converted to `now + delay`.
- * @param error - the failure.
- * @returns the ISO reset timestamp, or undefined when unstated.
- */
-function resetTimeFromError(error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const absolute = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/.exec(message)?.[0];
-    if (absolute !== undefined)
-        return absolute;
-    const delayMs = retryAfterMsFromError(error);
-    return delayMs === undefined ? undefined : new Date(Date.now() + delayMs).toISOString();
 }
 function messageIds(messages) {
     return messages.map(m => m.id ?? '');

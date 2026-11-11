@@ -1,6 +1,5 @@
 /**
- * 共享的「模型选择」模块（浏览器半）——CodeBuddy / Cursor / Antigravity 三个 ACP
- * 提供商共用。
+ * Antigravity 供应商级模型选择模块（浏览器半）。
  *
  * 用法（各插件 build 会把本文件拼在 `src/client.js` 前面，因此这里**只能**定义
  * 工厂函数，不得引用宿主作用域的任何符号）：
@@ -12,10 +11,6 @@
  * h(MS.ModelSelectionBlock, {
  *   adapter: MS.providerAdapter({ client, field: 'visibleModels' }),
  *   onStatus: (next) => setStatus(next),
- * })
- * // 账号级（子集：候选只来自供应商已启用的模型）
- * h(MS.ModelSelectionBlock, {
- *   adapter: MS.accountAdapter({ client, accountId, providerVisible }),
  * })
  * ```
  *
@@ -60,8 +55,6 @@ function createModelSelection(deps) {
 .dsh-modelselection-add-option { box-sizing: border-box; display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 2px 8px; border: 0; border-radius: 8px; background: transparent; color: var(--dsw-alias-label-primary, inherit); font: inherit; font-size: 12.5px; cursor: pointer; text-align: left; }
 @media (hover: hover) { .dsh-modelselection-add-option:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, color-mix(in srgb, currentColor 6%, transparent)); } }
 .dsh-modelselection-add-option:disabled { opacity: .45; cursor: default; }
-.dsh-modelselection-global-off { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 4px; border-top: 0.5px dashed var(--dsw-alias-border-l2, color-mix(in srgb, currentColor 10%, transparent)); font-size: 11px; color: var(--dsw-alias-label-tertiary, currentColor); }
-.dsh-modelselection-global-off-chip { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px; border-radius: 6px; background: color-mix(in srgb, currentColor 5%, transparent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; opacity: .72; }
 .dsh-modelselection-empty { font-size: 12px; color: var(--dsw-alias-label-tertiary, currentColor); margin: 0; padding: 12px 14px; border-radius: var(--dsw-radius-lg, 14px); border: 0.5px dashed var(--dsw-alias-border-l3, color-mix(in srgb, currentColor 18%, transparent)); }
 .dsh-modelselection-error { color: var(--dsw-alias-state-error-primary, #d9534f); font-size: 12px; margin: 0; padding: 0 2px; }
 .dsh-modelselection-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
@@ -92,7 +85,7 @@ function createModelSelection(deps) {
     stroke: 'currentColor', 'stroke-width': 1.9, 'stroke-linecap': 'round',
   }))
 
-  // ── 选择代数（纯函数：三个插件共用同一份行为，测试只测这一份）─────────────
+  // ── 选择代数（纯函数）────────────────────────────────────────────
 
   /** 候选列表：数据源没给就是空。 */
   function candidatesOf(adapter, status) {
@@ -148,14 +141,6 @@ function createModelSelection(deps) {
     return next
   }
 
-  /** 账号级子集：候选只保留供应商已启用的 id（供应商空清单 = 全部启用）。 */
-  function subsetOf(candidates, providerVisible) {
-    if (!Array.isArray(providerVisible) || providerVisible.length === 0) {
-      return candidates.filter((candidate) => candidate.enabled !== false)
-    }
-    return candidates.filter((candidate) => providerVisible.indexOf(candidate.id) >= 0)
-  }
-
   // ── 数据源适配 ────────────────────────────────────────────────────────
 
   /**
@@ -176,8 +161,8 @@ function createModelSelection(deps) {
       description: options.description !== undefined
         ? options.description
         : t(
-          'Controls which models appear in the composer picker; turning a model off hides it across all accounts.',
-          '控制对话模型菜单中展示的模型；在此关闭后全局隐藏，所有账号均不再对外提供。',
+          'Controls which models appear in the composer picker.',
+          '控制对话模型菜单中展示的模型。',
         ),
       candidates,
       checked: (status) => candidates(status).filter((model) => model.enabled !== false).map((model) => model.id),
@@ -188,58 +173,6 @@ function createModelSelection(deps) {
     }
   }
 
-  /**
-   * 账号级：候选来自「该账号真实支持的模型 ∩ 全局已启用模型」，写回该账号自己的清单。
-   * 空数组表示「跟随全局（不额外限制）」。
-   */
-  function accountAdapter(options) {
-    const client = options.client
-    const accountId = options.accountId
-    const field = options.accountField || 'visibleModels'
-    const accountsOf = (status) => (status && Array.isArray(status.accounts) ? status.accounts : [])
-    const rawAccountBase = (status) => {
-      const account = accountsOf(status).filter((entry) => entry && entry.id === accountId)[0]
-      return account && Array.isArray(account.availableModels) && account.availableModels.length > 0
-        ? account.availableModels
-        : (status && Array.isArray(status.availableModels) ? status.availableModels : [])
-    }
-    const candidates = (status) => subsetOf(
-      rawAccountBase(status),
-      status && Array.isArray(status.visibleModels) ? status.visibleModels : [],
-    )
-    const globallyHidden = (status) => {
-      const activeIds = candidates(status).map((c) => c.id)
-      return rawAccountBase(status).filter((item) => activeIds.indexOf(item.id) < 0)
-    }
-    const submit = (status, ids) => {
-      if (typeof options.submit === 'function') return options.submit(status, ids)
-      if (typeof options.writeAccounts !== 'function') return Promise.resolve(status)
-      return client.configure({ accounts: options.writeAccounts(status, accountId, ids) })
-    }
-    return {
-      title: options.title || t('Routable models', '账号调度模型'),
-      description: options.description !== undefined
-        ? options.description
-        : t(
-          'Limits which models the scheduler routes to this account; unchecked models route to other accounts.',
-          '限定调度器允许分派给该账号的模型；未勾选的模型自动交由池内其他账号承接。',
-        ),
-      candidates,
-      globallyHidden,
-      checked: (status) => {
-        const account = accountsOf(status).filter((entry) => entry && entry.id === accountId)[0]
-        const own = account && Array.isArray(account[field]) ? account[field] : []
-        const offeredIds = candidates(status).map((candidate) => candidate.id)
-        if (own.length === 0) return offeredIds
-        return own.filter((id) => offeredIds.indexOf(id) >= 0)
-      },
-      load: () => client.status(),
-      fetch: () => (typeof options.fetch === 'function' ? options.fetch() : client.warmup()),
-      apply: (ids, status) => submit(status, ids),
-      reset: (status) => submit(status, []),
-    }
-  }
-
   // ── 区块 ──────────────────────────────────────────────────────────────
 
   /**
@@ -247,9 +180,9 @@ function createModelSelection(deps) {
    *   1. 已启用模型直接在卡片内每行展示，右侧带一键移除按钮（无需弹窗）；
    *   2. 有未启用模型时，卡片底部提供本地零延迟「+ 添加模型」（候选较少时原地展开即点即加，候选较多时秒开搜索弹窗）；
    *   3. 顶部「获取可用模型」用于向服务端同步最新目录并打开批量选择弹窗。
-   * @param props.adapter - 见 {@link providerAdapter} / {@link accountAdapter}。
+   * @param props.adapter - 见 {@link providerAdapter}。
    * @param props.disabled - 额外禁用（父级写入中、只读部署等）。
-   * @param props.compact - 紧凑版：账号编辑器内使用。
+   * @param props.compact - 可选的紧凑布局。
    * @param props.onStatus - 可选回调，状态更新后同步通知父组件。
    */
   function ModelSelectionBlock(props) {
@@ -301,7 +234,6 @@ function createModelSelection(deps) {
 
     const candidates = candidatesOf(adapter, status)
     const candidateIds = candidates.map((c) => c.id)
-    const globallyHidden = adapter && typeof adapter.globallyHidden === 'function' ? adapter.globallyHidden(status) : []
     const checked = isDraftControlled
       ? (props.draftIds.length === 0
         ? candidateIds
@@ -392,7 +324,7 @@ function createModelSelection(deps) {
       setOpen(true)
     }
 
-    /** 同步远程端点目录并打开选择模型弹窗（供应商级与账号级统一交互）。 */
+    /** 同步远程端点目录并打开选择模型弹窗。 */
     const fetchModels = async () => {
       if (candidates.length > 0) {
         setQuery('')
@@ -516,21 +448,6 @@ function createModelSelection(deps) {
                       : null)))
                 : null)
             : null),
-      globallyHidden.length > 0
-        ? h('div', { className: 'dsh-modelselection-global-off' },
-          h('span', null, t('Turned off in Exposed models:', '全局已关闭（不参与调度）：')),
-          ...globallyHidden.slice(0, 3).map((item) => h('span', {
-            key: item.id,
-            className: 'dsh-modelselection-global-off-chip',
-            title: t('Enable this model in Exposed models on the main page first', '需先在外部「对外可用模型」中开启该模型'),
-          }, item.id)),
-          globallyHidden.length > 3
-            ? h('span', {
-              className: 'dsh-modelselection-global-off-chip',
-              title: globallyHidden.slice(3).map((item) => item.id).join(', '),
-            }, t(`+${globallyHidden.length - 3} more`, `等共 ${globallyHidden.length} 个`))
-            : null)
-        : null,
       failure ? h('p', { role: 'alert', className: 'dsh-modelselection-error' }, failure) : null,
       h(Modal, {
         open,
@@ -589,8 +506,7 @@ function createModelSelection(deps) {
     CSS,
     ModelSelectionBlock,
     providerAdapter,
-    accountAdapter,
     // 纯函数导出，供单元测试直接覆盖选择代数。
-    algebra: { candidatesOf, checkedOf, isPicked, pickedIdsOf, matchesQuery, toggleId, toggleVisible, subsetOf },
+    algebra: { candidatesOf, checkedOf, isPicked, pickedIdsOf, matchesQuery, toggleId, toggleVisible },
   }
 }

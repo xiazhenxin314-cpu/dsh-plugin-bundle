@@ -5,6 +5,7 @@
  * @module dsh-llm-antigravity-acp/config
  */
 import z from '@deepseek-ai/schemastery';
+import { accountRemark } from "./accounts.js";
 /** Reasoning effort ids accepted by the Antigravity ACP `thought_level` option. */
 export const EFFORTS = ['low', 'medium', 'high'];
 function maybeVolatile(schema) {
@@ -18,19 +19,7 @@ export const Config = z.object({
     command: z.string().default(''),
     home: z.string().default(''),
     contextWindow: maybeVolatile(z.number().step(1).min(0).default(0)),
-    accounts: maybeVolatile(z.array(z.object({
-        id: z.string().default(''),
-        displayName: z.string().default(''),
-        home: z.string().default(''),
-        enabled: z.boolean().default(true),
-        env: z.dict(z.string()).default({}),
-        contextWindow: z.number().step(1).min(0).max(1_048_576).default(0),
-        system: z.boolean().default(false),
-        visibleModels: z.array(z.string()).default([]),
-        priority: z.number().step(1).min(1).max(999).default(1),
-        weight: z.number().step(1).min(1).max(100).default(1),
-    })).default([])),
-    configVersion: maybeVolatile(z.number().step(1).min(0).default(0)),
+    accountLabel: maybeVolatile(z.transform(z.string(), accountRemark).default('')),
     visibleModels: maybeVolatile(z.array(z.string()).default([])),
     defaultEffort: maybeVolatile(z.union(EFFORTS).default('high')),
     autoPatch: z.boolean().default(true),
@@ -43,7 +32,6 @@ export const Config = z.object({
     relayAfterMs: z.number().step(1).min(5_000).max(165_000).default(85_000),
     longDecodeContinuations: maybeVolatile(z.number().step(1).min(0).max(16).default(3)),
     warmup: z.boolean().default(true),
-    quotaTtlMs: z.number().step(1).min(5_000).default(120_000),
     // The published schemastery declarations type `.volatile()` fields as plain values.
 });
 /**

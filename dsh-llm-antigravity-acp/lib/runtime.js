@@ -102,6 +102,25 @@ export class AntigravityRuntime {
             issuedIds: [...conv.issuedIds],
         });
     }
+    /** Provider group name; empty configuration falls back to the shipped label. */
+    displayName() {
+        const value = this.overrides.displayName ?? current(this.host.config.displayName);
+        return value.length > 0 ? value : 'Antigravity';
+    }
+    /** Configured per-model display names, keyed by model id. */
+    modelNames() {
+        return { ...(this.overrides.modelNames ?? current(this.host.config.modelNames) ?? {}) };
+    }
+    /**
+     * Display name of one model: the configured override, else the advertised name.
+     * @param id - advertised model id.
+     * @param advertised - name the ACP server published.
+     * @returns the name the picker shows.
+     */
+    modelName(id, advertised) {
+        const value = this.modelNames()[id];
+        return typeof value === 'string' && value.length > 0 ? value : advertised;
+    }
     /** Configured context window (0 = auto). */
     configuredContextWindow() {
         return this.overrides.contextWindow ?? current(this.host.config.contextWindow);
@@ -185,6 +204,8 @@ export class AntigravityRuntime {
             this.overrides.accountLabel = accountRemark(patch.accountLabel);
         if (patch.visibleModels !== undefined)
             this.catalog.applyVisibility(this.providerVisible());
+        if (patch.displayName !== undefined)
+            this.host.onDisplayNameChanged?.();
         this.host.onModelsChanged();
         return this.status();
     }
@@ -228,8 +249,10 @@ export class AntigravityRuntime {
             configuredContextWindow: this.configuredContextWindow(),
             defaultEffort: this.defaultEffort(),
             longDecodeContinuations: this.longDecodeContinuations(),
-            models: this.catalog.list().map(m => ({ ...m })),
-            availableModels: this.catalog.availableModels().map(m => ({ ...m })),
+            displayName: this.displayName(),
+            modelNames: this.modelNames(),
+            models: this.catalog.list().map(m => ({ ...m, name: this.modelName(m.id, m.name) })),
+            availableModels: this.catalog.availableModels().map(m => ({ ...m, name: this.modelName(m.id, m.name) })),
             visibleModels: this.providerVisible(),
             efforts: [...this.catalog.effortList()],
             liveSessions: [...this.conversations.values()].filter(c => c.sessionId !== undefined).length,

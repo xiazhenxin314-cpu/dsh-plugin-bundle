@@ -63,7 +63,7 @@ function makeRuntime(extra = {}) {
   const prompts = () => existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)) : []
   const inits = () => existsSync(initLog) ? readFileSync(initLog, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)) : []
   const mcps = () => existsSync(mcpLog) ? readFileSync(mcpLog, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)) : []
-  return { home, runtime, prompts, inits, mcps, adapter: new AntigravityAdapter(runtime, 'Antigravity', () => true) }
+  return { home, runtime, prompts, inits, mcps, adapter: new AntigravityAdapter(runtime, () => true) }
 }
 
 after(async () => { for (const r of runtimes) await r.dispose() })
@@ -1248,7 +1248,7 @@ test('session-index.json resumes ACP sessions via native session/load across cap
     onModelsChanged: () => undefined,
   })
   runtimes.push(restarted)
-  const adapter2 = new AntigravityAdapter(restarted, 'Antigravity', () => false)
+  const adapter2 = new AntigravityAdapter(restarted, () => false)
   histA = [...histA, user('au3', 'turn three after restart')]
   await collect(adapter2.stream({ ...baseA, messages: histA }))
   const prompts2 = readFileSync(log2, 'utf8').trim().split('\n').map(l => JSON.parse(l))
@@ -1507,4 +1507,23 @@ test('single-account quota and transient errors keep original codes and finite r
     assert.equal(policy.maxRetries, 4)
     assert.ok(!policy.retryableCodes.includes('QUOTA'))
   }
+})
+
+test('live renames reach the provider group, the model ids and the directory hook', async () => {
+  let republished = 0
+  const { runtime, adapter } = makeRuntime({ host: { onDisplayNameChanged: () => { republished += 1 } } })
+  assert.equal(adapter.providerInfo('antigravity').name, 'Antigravity')
+  assert.equal(runtime.modelName('gemini-4-argon', 'Gemini 4 Argon'), 'Gemini 4 Argon')
+  // configure() takes values the RPC boundary already normalized.
+  const status = runtime.configure({ displayName: '小臻 Antigravity', modelNames: { 'gemini-4-argon': 'Argon 高速' } })
+  assert.equal(runtime.displayName(), '小臻 Antigravity')
+  assert.equal(adapter.providerInfo('antigravity').name, '小臻 Antigravity', 'the picker group name follows the live rename')
+  assert.equal(status.displayName, '小臻 Antigravity')
+  assert.deepEqual(status.modelNames, { 'gemini-4-argon': 'Argon 高速' })
+  assert.equal(republished, 1, 'the directory row is republished exactly once per rename')
+  assert.equal(runtime.modelName('gemini-4-argon', 'Gemini 4 Argon'), 'Argon 高速')
+  assert.equal(runtime.modelName('gemini-3.8-flash', 'Gemini 3.8 Flash'), 'Gemini 3.8 Flash', 'untouched ids keep the advertised name')
+  // A context-only change must not republish the row.
+  runtime.configure({ contextWindow: 256_000 })
+  assert.equal(republished, 1)
 })

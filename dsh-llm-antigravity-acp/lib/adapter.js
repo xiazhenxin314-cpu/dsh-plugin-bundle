@@ -21,21 +21,18 @@ const ANTIGRAVITY_RETRY_POLICY = resolveRetryPolicy({
 /** Antigravity primary-model adapter. */
 export class AntigravityAdapter extends LlmAdapter {
     runtime;
-    displayName;
     imageInput;
     /**
-     * @param runtime - process and session owner.
-     * @param displayName - provider group name.
+     * @param runtime - process and session owner; also the live name source.
      * @param imageInput - whether request images can be read.
      */
-    constructor(runtime, displayName, imageInput) {
+    constructor(runtime, imageInput) {
         super();
         this.runtime = runtime;
-        this.displayName = displayName;
         this.imageInput = imageInput;
     }
     providerInfo(provider) {
-        return { id: provider, name: this.displayName };
+        return { id: provider, name: this.runtime.displayName() };
     }
     providerRetryPolicy(_provider) {
         return ANTIGRAVITY_RETRY_POLICY;
@@ -44,7 +41,7 @@ export class AntigravityAdapter extends LlmAdapter {
         return Promise.resolve(this.runtime.catalog.list().map(model => ({
             provider,
             id: model.id,
-            name: model.name,
+            name: this.runtime.modelName(model.id, model.name),
             description: 'Antigravity via the official ACP server',
             inputModalities: this.imageInput() ? ['text', 'image'] : ['text'],
         })));

@@ -18,8 +18,8 @@ export type Effort = typeof EFFORTS[number]
 export interface Config {
   /** Provider route id shown in the model picker. */
   provider: string
-  /** Display name of the provider group. */
-  displayName: string
+  /** Display name of the provider group; a live setting. */
+  displayName: Volatile<string>
   /** Absolute path of the `agy` executable; empty resolves `~/.local/bin/agy`, then `agy` on PATH. */
   command: string
   /** Plugin-owned ACP session/catalog cache; does not isolate or replace the system login. */
@@ -31,6 +31,8 @@ export interface Config {
    * advertises. Empty offers every advertised family.
    */
   visibleModels: Volatile<string[]>
+  /** Per-model display names, keyed by the advertised model id; a live setting. */
+  modelNames: Volatile<Record<string, string>>
   /** Declared context window in tokens; 0 selects 1,048,576 for an unlocked binary and 256,000 otherwise. */
   contextWindow: Volatile<number>
   /** Effort applied when a request carries none. */
@@ -65,12 +67,13 @@ function maybeVolatile<T>(schema: T): T {
 /** Configuration schema. */
 export const Config: z<Config> = z.object({
   provider: z.string().default('antigravity'),
-  displayName: z.string().default('Antigravity'),
+  displayName: maybeVolatile(z.string().default('Antigravity')),
   command: z.string().default(''),
   home: z.string().default(''),
   contextWindow: maybeVolatile(z.number().step(1).min(0).default(0)),
   accountLabel: maybeVolatile(z.transform(z.string(), accountRemark).default('')),
   visibleModels: maybeVolatile(z.array(z.string()).default([])),
+  modelNames: maybeVolatile(z.dict(z.string()).default({})),
   defaultEffort: maybeVolatile(z.union(EFFORTS).default('high')),
   autoPatch: z.boolean().default(true),
   patchScript: z.string().default(''),

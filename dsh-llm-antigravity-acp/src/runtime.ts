@@ -71,6 +71,8 @@ export interface RuntimeHost {
   log: { info(message: string): void; warn(message: string): void }
   /** Notify catalog consumers that the model list changed. */
   onModelsChanged(): void
+  /** Republish the provider directory row after a live rename. */
+  onDisplayNameChanged?(): void
   /** Delay before a parked call answers with a still-running notice; overrides config.relayAfterMs (85 seconds). */
   relayAfterMs?: number
 }
@@ -82,6 +84,10 @@ export interface LiveOverrides {
   longDecodeContinuations?: number
   /** Local remark, never a credential-derived identity. */
   accountLabel?: string
+  /** Provider group name, applied to the picker and the Models page row. */
+  displayName?: string
+  /** Per-model display names, keyed by advertised model id; replaces the map. */
+  modelNames?: Record<string, string>
   /**
    * Provider-level model allowlist: empty offers every advertised family, a
    * non-empty list offers only those ids. Applied live, without a new ACP
@@ -106,6 +112,10 @@ export interface RuntimeStatus {
   unlock?: PreflightResult['unlock']
   contextWindow: number
   configuredContextWindow: number
+  /** Effective provider group name. */
+  displayName: string
+  /** Effective per-model display names, keyed by model id. */
+  modelNames: Record<string, string>
   defaultEffort: Effort
   longDecodeContinuations: number
   models: { id: string; name: string }[]
@@ -203,6 +213,28 @@ export class AntigravityRuntime {
   }
 
 
+  /** Provider group name; empty configuration falls back to the shipped label. */
+  displayName(): string {
+    const value = this.overrides.displayName ?? current(this.host.config.displayName)
+    return value.length > 0 ? value : 'Antigravity'
+  }
+
+  /** Configured per-model display names, keyed by model id. */
+  modelNames(): Record<string, string> {
+    return { ...(this.overrides.modelNames ?? current(this.host.config.modelNames) ?? {}) }
+  }
+
+  /**
+   * Display name of one model: the configured override, else the advertised name.
+   * @param id - advertised model id.
+   * @param advertised - name the ACP server published.
+   * @returns the name the picker shows.
+   */
+  modelName(id: string, advertised: string): string {
+    const value = this.modelNames()[id]
+    return typeof value === 'string' && value.length > 0 ? value : advertised
+  }
+
   /** Configured context window (0 = auto). */
   configuredContextWindow(): number {
     return this.overrides.contextWindow ?? current(this.host.config.contextWindow)
@@ -288,6 +320,7 @@ export class AntigravityRuntime {
     this.overrides = { ...this.overrides, ...patch }
     if (patch.accountLabel !== undefined) this.overrides.accountLabel = accountRemark(patch.accountLabel)
     if (patch.visibleModels !== undefined) this.catalog.applyVisibility(this.providerVisible())
+    if (patch.displayName !== undefined) this.host.onDisplayNameChanged?.()
     this.host.onModelsChanged()
     return this.status()
   }
@@ -335,8 +368,10 @@ export class AntigravityRuntime {
       configuredContextWindow: this.configuredContextWindow(),
       defaultEffort: this.defaultEffort(),
       longDecodeContinuations: this.longDecodeContinuations(),
-      models: this.catalog.list().map(m => ({ ...m })),
-      availableModels: this.catalog.availableModels().map(m => ({ ...m })),
+      displayName: this.displayName(),
+      modelNames: this.modelNames(),
+      models: this.catalog.list().map(m => ({ ...m, name: this.modelName(m.id, m.name) })),
+      availableModels: this.catalog.availableModels().map(m => ({ ...m, name: this.modelName(m.id, m.name) })),
       visibleModels: this.providerVisible(),
       efforts: [...this.catalog.effortList()],
       liveSessions: [...this.conversations.values()].filter(c => c.sessionId !== undefined).length,

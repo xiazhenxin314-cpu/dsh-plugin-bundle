@@ -644,6 +644,11 @@ window.__ModuleLoader__.load({
       '.dsh-agy-input::placeholder{color:var(--dsw-alias-label-tertiary)}',
       '.dsh-agy-input:hover:not(:disabled){border-color:var(--dsw-alias-label-tertiary, color-mix(in srgb, currentColor 32%, transparent))}',
       '.dsh-agy-input:focus-visible{border-color:var(--dsw-alias-state-business-primary, #4176e6);box-shadow:0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 18%, transparent)}',
+      '.dsh-agy-field{display:flex;flex-direction:column;gap:4px;min-width:0}',
+      '.antigravity-settings-card .dsh-agy-card > .dsh-agy-field{min-height:42px;padding:8px 10px;justify-content:center}',
+      '.dsh-agy-field-error{font-size:11px;line-height:16px;color:var(--dsw-alias-state-error-primary, #d9534f)}',
+      '.dsh-agy-input-wide{flex:1 1 auto;max-width:340px;text-align:left}',
+      '.dsh-agy-model-id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary, currentColor);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:0}',
       '.dsh-agy-dot{display:inline-block;width:7px;height:7px;border-radius:999px;flex:0 0 auto}',
       '.dsh-agy-badge{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:999px;font-size:11px;line-height:18px;font-weight:500;white-space:nowrap;background:var(--dsw-alias-bg-module-platform, color-mix(in srgb, currentColor 6%, transparent));color:var(--dsw-alias-label-primary)}',
       '.dsh-agy-tag{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;font-size:11px;line-height:18px;white-space:nowrap;font-variant-numeric:tabular-nums;background:var(--dsw-alias-bg-module-platform, color-mix(in srgb, currentColor 5%, transparent));color:var(--dsw-alias-label-secondary, var(--dsw-alias-label-tertiary, currentColor))}',
@@ -796,6 +801,76 @@ window.__ModuleLoader__.load({
         error ? h('div', { role: 'alert' }, error) : null)
     }
 
+    /**
+     * One editable text row: trims and collapses whitespace, commits on Enter
+     * or blur, and leaves the stored value alone when the text is unchanged.
+     */
+    function TextField(props) {
+      const [draft, setDraft] = React.useState(props.value)
+      const [error, setError] = React.useState(null)
+      React.useEffect(() => { setDraft(props.value) }, [props.value])
+      const commit = () => {
+        if (props.disabled) return
+        const value = draft.trim().replace(/\s+/g, ' ')
+        if (value.length === 0 && !props.allowEmpty) {
+          setError(t('Cannot be empty', '不能为空'))
+          return
+        }
+        if ([...value].length > 64) {
+          setError(t('Use at most 64 characters', '最多 64 个字符'))
+          return
+        }
+        setError(null)
+        if (value !== props.value) void props.onSave(value)
+      }
+      return h('div', { className: 'dsh-agy-field' },
+        props.hideLabel ? null : h('span', { className: 'dsh-agy-label' }, props.label),
+        h('input', {
+          className: props.wide ? 'dsh-agy-input dsh-agy-input-wide' : 'dsh-agy-input',
+          'aria-label': props.label,
+          value: draft,
+          disabled: props.disabled,
+          placeholder: props.placeholder || '',
+          onChange: (event) => setDraft(event.target.value),
+          onBlur: commit,
+          onKeyDown: (event) => { if (event.key === 'Enter') { event.preventDefault?.(); commit() } },
+        }),
+        error ? h('div', { role: 'alert', className: 'dsh-agy-field-error' }, error) : null)
+    }
+
+    /**
+     * Model directory: one row per advertised model, the id read-only and the
+     * display name editable. Clearing a name drops the override and the row
+     * falls back to the name the ACP server advertises.
+     */
+    function ModelNameList(props) {
+      const models = Array.isArray(props.models) ? props.models : []
+      if (models.length === 0) return null
+      const names = props.names || {}
+      const save = (model, next) => {
+        const value = next.trim().replace(/\s+/g, ' ')
+        const map = { ...names }
+        if (value.length === 0 || value === model.name) delete map[model.id]
+        else map[model.id] = value
+        void props.onSave(map)
+      }
+      return h('div', { className: 'dsh-agy-card' },
+        h(InfoRow, { label: t('Model names', '模型名称'), value: t('Shown in the picker', '显示在模型菜单') }),
+        ...models.map((model) => h('div', { key: model.id, className: 'dsh-agy-row' },
+          h('span', { className: 'dsh-agy-model-id' }, model.id),
+          h('span', { className: 'dsh-agy-value', style: { flex: '1 1 auto', minWidth: 0, justifyContent: 'flex-end' } },
+            h(TextField, {
+              label: model.id + ' ' + t('name', '名称'),
+              value: names[model.id] || model.name,
+              placeholder: model.name,
+              disabled: props.busy,
+              hideLabel: true,
+              wide: true,
+              allowEmpty: true,
+              onSave: (next) => save(model, next),
+            })))))
+    }
+
     const EFFORT_OPTIONS = [
       { value: 'low', label: 'Low' },
       { value: 'medium', label: 'Medium' },
@@ -934,6 +1009,13 @@ window.__ModuleLoader__.load({
         h('div', { className: 'dsh-agy-settings-body', ref: rootRef },
           status ? h('div', { className: 'dsh-agy-card' },
             h(InfoRow, { label: t('Status', '状态') }, statusBadges),
+            h(TextField, {
+              label: t('Display name', '显示名称'),
+              value: status.displayName || 'Antigravity',
+              placeholder: 'Antigravity',
+              disabled: busy,
+              onSave: (displayName) => void applyPatch({ displayName }),
+            }),
             h(ChoiceRow, {
               label: t('Window', '上下文窗口'),
               options: windowOptions(),
@@ -967,6 +1049,12 @@ window.__ModuleLoader__.load({
             adapter: antigravityModelAdapter(props.client),
             disabled: busy,
             onStatus: adoptStatus,
+          }) : null,
+          status ? h(ModelNameList, {
+            models: status.models || [],
+            names: status.modelNames || {},
+            busy,
+            onSave: (modelNames) => void applyPatch({ modelNames }),
           }) : null,
           status ? h(LocalLabel, { value: status.accountLabel || '', busy, onSave: (accountLabel) => applyPatch({ accountLabel }) }) : null),
         error ? h('div', { role: 'alert', style: { color: '#d9534f', fontSize: 12 } }, error) : null)

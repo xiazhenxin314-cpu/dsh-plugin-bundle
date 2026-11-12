@@ -34,6 +34,54 @@ function parseVisibleModels(value, label) {
     }
     return ids;
 }
+/** Longest accepted provider or model display name, in characters. */
+const MAX_DISPLAY_NAME = 64;
+/**
+ * Normalize one display name: trimmed, inner whitespace collapsed.
+ * @param value - raw candidate.
+ * @param label - dotted path used in the error message.
+ * @returns the normalized name.
+ * @throws when the value is not a non-empty string of bounded length.
+ */
+function parseDisplayName(value, label) {
+    if (typeof value !== 'string')
+        throw new TypeError(label);
+    const name = value.trim().replace(/\s+/g, ' ');
+    if (name.length === 0 || [...name].length > MAX_DISPLAY_NAME)
+        throw new TypeError(label);
+    return name;
+}
+/**
+ * Validate a per-model display-name map. An empty name clears that override,
+ * so the model falls back to the name the ACP server advertises.
+ * @param value - candidate field, undefined when the caller omitted it.
+ * @param label - dotted path used in the error message.
+ * @returns id → name, overrides with a cleared name omitted.
+ * @throws when the field is not a plain object of bounded keys and names.
+ */
+function parseModelNames(value, label) {
+    if (value === undefined)
+        return {};
+    if (value === null || typeof value !== 'object' || Array.isArray(value))
+        throw new TypeError(label);
+    const entries = Object.entries(value);
+    if (entries.length > 500)
+        throw new TypeError(label);
+    const out = {};
+    for (const [rawId, rawName] of entries) {
+        const id = rawId.trim();
+        if (id.length === 0 || id.length > 200)
+            throw new TypeError(label);
+        if (typeof rawName !== 'string')
+            throw new TypeError(label);
+        const name = rawName.trim().replace(/\s+/g, ' ');
+        if ([...name].length > MAX_DISPLAY_NAME)
+            throw new TypeError(label);
+        if (name.length > 0)
+            out[id] = name;
+    }
+    return out;
+}
 /**
  * Validate live settings. Unknown and retired account-management fields are
  * ignored rather than passed to the runtime or persisted into the profile.
@@ -75,6 +123,10 @@ export function parseConfigureRequest(value) {
     }
     if (record.visibleModels !== undefined)
         out.visibleModels = parseVisibleModels(record.visibleModels, 'Invalid antigravity configure request.visibleModels');
+    if (record.displayName !== undefined)
+        out.displayName = parseDisplayName(record.displayName, 'Invalid antigravity displayName');
+    if (record.modelNames !== undefined)
+        out.modelNames = parseModelNames(record.modelNames, 'Invalid antigravity modelNames');
     return out;
 }
 function parseStatus(value) {

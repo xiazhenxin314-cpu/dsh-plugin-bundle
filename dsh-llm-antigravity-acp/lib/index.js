@@ -69,7 +69,8 @@ export function apply(ctx, config) {
         const image = await store.readImageRequest(ref, { width: ref.width, height: ref.height, maxBytes: REQUEST_IMAGE_MAX_BYTES });
         return { data: Buffer.from(image.data).toString('base64'), mimeType: image.mediaType };
     };
-    const runtime = new AntigravityRuntime({
+    // Held so a live rename can republish the directory row without reactivating.
+    const host = {
         config,
         spawnAcp,
         runCommand,
@@ -80,19 +81,28 @@ export function apply(ctx, config) {
             warn: message => ctx.logger.warn(message),
         },
         onModelsChanged: () => ctx.emit('llm/models-updated', config.provider),
-    });
+    };
+    const runtime = new AntigravityRuntime(host);
     const fiberEntry = ctx.fiber.entry;
     const settingsNs = fiberEntry?.options?.id ?? name;
-    const adapter = new AntigravityAdapter(runtime, config.displayName, () => attachments() !== undefined);
-    ctx.llm.registerConfigurableProviders([
-        {
-            provider: config.provider,
-            displayName: config.displayName,
-            settingsNs,
-            settingsPath: [],
-            nativeAuth: { env: [], oauth: true },
-        },
-    ]);
+    const adapter = new AntigravityAdapter(runtime, () => attachments() !== undefined);
+    const directoryEntry = {
+        provider: config.provider,
+        displayName: runtime.displayName(),
+        settingsNs,
+        settingsPath: [],
+        nativeAuth: { env: [], oauth: true },
+    };
+    const directory = ctx.llm.registerConfigurableProviders([directoryEntry]);
+    // A rename swaps the held entry, which republishes the Models page row. A
+    // disposed registration (plugin reloading) keeps the old label until the
+    // next activation instead of failing the configure call.
+    host.onDisplayNameChanged = () => {
+        try {
+            directory.replace([{ ...directoryEntry, displayName: runtime.displayName() }]);
+        }
+        catch { /* REGISTRATION_DISPOSED during reload */ }
+    };
     ctx.llm.registerAdapter([config.provider], adapter);
     ctx.effect(() => () => {
         void runtime.dispose();

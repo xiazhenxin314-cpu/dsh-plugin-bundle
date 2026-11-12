@@ -78,7 +78,7 @@ function makeRuntime({ plan } = {}) {
     warnings,
     /** Every `usage-gap` report the runtime logged. */
     gaps: () => warnings.filter(w => w.startsWith('antigravity-acp: usage-gap')),
-    adapter: new AntigravityAdapter(runtime, 'Antigravity', () => true),
+    adapter: new AntigravityAdapter(runtime, () => true),
   }
 }
 

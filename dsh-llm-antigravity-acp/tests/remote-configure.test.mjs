@@ -117,3 +117,32 @@ test('warmup has no account selection and returns runtime failures through statu
     assert.deepEqual(writes, [])
   }
 })
+
+test('configure accepts display names and per-model renames, normalizing both', () => {
+  assert.deepEqual(parseConfigureRequest({
+    displayName: '  小臻   Antigravity ',
+    modelNames: { 'gemini-4-argon': '  Argon   高速 ', 'gemini-3.8-flash': '   ' },
+  }), {
+    displayName: '小臻 Antigravity',
+    // A blank name clears that override instead of storing an empty label.
+    modelNames: { 'gemini-4-argon': 'Argon 高速' },
+  })
+})
+
+test('configure rejects a blank provider name and malformed model name maps', () => {
+  assert.throws(() => parseConfigureRequest({ displayName: '   ' }), /displayName/)
+  assert.throws(() => parseConfigureRequest({ displayName: 7 }), /displayName/)
+  assert.throws(() => parseConfigureRequest({ modelNames: { 'gemini-4-argon': 'x'.repeat(65) } }), /modelNames/)
+  assert.throws(() => parseConfigureRequest({ modelNames: [] }), /modelNames/)
+  assert.throws(() => parseConfigureRequest({ modelNames: { '  ': 'Fast' } }), /modelNames/)
+})
+
+test('configure persists both renames through the settings writer', async () => {
+  const { remote, writes, patches } = mountRemote()
+  await remote.configure({ displayName: '小臻 Antigravity', modelNames: { 'gemini-4-argon': '高速' } })
+  assert.deepEqual(patches.at(-1), { displayName: '小臻 Antigravity', modelNames: { 'gemini-4-argon': '高速' } })
+  assert.deepEqual(writes.at(-1), {
+    ns: 'test-antigravity',
+    values: { displayName: '小臻 Antigravity', modelNames: { 'gemini-4-argon': '高速' } },
+  })
+})

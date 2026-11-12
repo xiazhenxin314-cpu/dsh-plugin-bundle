@@ -809,3 +809,47 @@ test('source bundle stays isolated when loaded beside another copy', () => {
   vm.runInNewContext(bundle + '\n' + bundle, { window: { __ModuleLoader__: { load(spec) { loaded.push(spec.id) } } } })
   assert.deepEqual(loaded, ['dsh-llm-antigravity-acp', 'dsh-llm-antigravity-acp'])
 })
+
+test('the settings page renames the provider group and single models through configure', async () => {
+  const patches = []
+  const models = [{ id: 'gemini-4-argon', name: 'Gemini 4 Argon' }, { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' }]
+  let displayName = 'Antigravity'
+  let modelNames = {}
+  const snapshot = () => ({
+    ...catalogStatus([]),
+    displayName,
+    modelNames,
+    models: models.map((model) => ({ ...model, name: modelNames[model.id] || model.name })),
+  })
+  const { registered, mount } = loadClientPlugin({
+    language: 'en-US',
+    remoteService: {
+      status: async () => snapshot(),
+      configure: async (patch) => {
+        patches.push(JSON.parse(JSON.stringify(patch)))
+        if (patch.displayName !== undefined) displayName = patch.displayName
+        if (patch.modelNames !== undefined) modelNames = patch.modelNames
+        return snapshot()
+      },
+    },
+  })
+  const slot = registered.get('settings.section')
+  const view = mount(slot.Component, slot.meta.inject())
+  await flush()
+  const field = (label) => findOne(view.tree, (n) => n.tag === 'input' && n.props['aria-label'] === label)
+  field('Display name').props.onChange({ target: { value: '  小臻   Antigravity ' } })
+  field('Display name').props.onKeyDown({ key: 'Enter', preventDefault() {} })
+  await flush()
+  assert.deepEqual(patches[0], { displayName: '小臻 Antigravity' })
+  assert.match(textOf(view.tree), /Model names/)
+  field('gemini-4-argon name').props.onChange({ target: { value: ' Argon   高速 ' } })
+  field('gemini-4-argon name').props.onKeyDown({ key: 'Enter', preventDefault() {} })
+  await flush()
+  assert.deepEqual(patches.at(-1), { modelNames: { 'gemini-4-argon': 'Argon 高速' } })
+  // Clearing the field drops the override so the advertised name returns.
+  field('gemini-4-argon name').props.onChange({ target: { value: '' } })
+  field('gemini-4-argon name').props.onKeyDown({ key: 'Enter', preventDefault() {} })
+  await flush()
+  assert.deepEqual(patches.at(-1), { modelNames: {} })
+  view.unmount()
+})

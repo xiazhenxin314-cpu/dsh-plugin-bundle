@@ -83,7 +83,7 @@ function makeRuntime({ config: configExtra = {}, host = {}, plan, env: envExtra 
     prompts: () => readJsonl(log),
     /** ACP session/new, session/load, and session/close in arrival order. */
     lifecycle: () => readJsonl(lifecycleFile),
-    adapter: new AntigravityAdapter(runtime, 'Antigravity', () => true),
+    adapter: new AntigravityAdapter(runtime, () => true),
   }
 }
 

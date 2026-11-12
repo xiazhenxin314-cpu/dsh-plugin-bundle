@@ -381,13 +381,27 @@ window.__ModuleLoader__.load({
       const expanded = props.open === true || observed
       React.useEffect(() => {
         const element = ref.current
-        if (!element || typeof element.parentElement === 'undefined' || element.parentElement === null) return undefined
-        if (typeof MutationObserver === 'undefined') return undefined
-        const parent = element.parentElement
-        const sync = () => setObserved(element.nextElementSibling !== null)
-        const observer = new MutationObserver(sync)
-        observer.observe(parent, { childList: true })
+        if (!element) return undefined
+        // The host renders the seat inside the row's <li>, and appends the
+        // provider editor to that same <li> only while the row is expanded.
+        // A slot wrapper may sit in between, so watch the whole row.
+        const row = (typeof element.closest === 'function' ? element.closest('li') : null) ?? element.parentElement
+        if (!row) return undefined
+        const sync = () => {
+          if (element.nextElementSibling !== null) {
+            setObserved(true)
+            return
+          }
+          // The host's own editor carries this hint text; it exists only while
+          // the row is expanded, which keeps the check working even if the
+          // editor is nested rather than a direct sibling.
+          const text = typeof row.textContent === 'string' ? row.textContent : ''
+          setObserved(text.indexOf('cordis.patch.yml') >= 0)
+        }
         sync()
+        if (typeof MutationObserver === 'undefined') return undefined
+        const observer = new MutationObserver(sync)
+        observer.observe(row, { childList: true, subtree: true, characterData: true })
         return () => observer.disconnect()
       }, [])
       return h('div', {

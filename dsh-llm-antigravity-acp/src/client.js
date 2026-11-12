@@ -479,7 +479,12 @@ window.__ModuleLoader__.load({
         const wrapper = typeof seat.closest === 'function' ? seat.closest('[data-slot="settings.models.provider-card"]') : null
         let hidden = null
         const sync = () => {
-          const last = wrapper !== null && wrapper !== undefined ? wrapper.nextElementSibling : null
+          // Slot wrapper first (the page always appends its editor right after
+          // it); the row's last child is the older anchor and stays as the
+          // fallback for a build that stops tagging the wrapper.
+          const last = wrapper !== null && wrapper !== undefined
+            ? wrapper.nextElementSibling
+            : row.lastElementChild
           const open = last !== null && last !== undefined && !last.contains(seat)
           setObserved(open)
           if (!open) return

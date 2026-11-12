@@ -178,8 +178,18 @@ export class AcpProcess {
     }, { timeoutMs })
   }
 
+  /**
+   * Whether {@link stop} ended this process on purpose.
+   *
+   * A deliberate shutdown — the idle sweep, a dispose, a supersede — closes the
+   * same way a crash does, so the runtime has to be told which one this was or
+   * the status keeps a red failure the user never caused.
+   */
+  intentionalStop = false
+
   /** Terminate the process. */
   stop(): void {
+    this.intentionalStop = true
     this.fail(new Error('ACP process stopped'))
     this.child?.terminate()
   }

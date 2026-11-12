@@ -751,10 +751,17 @@ export class AntigravityRuntime {
                 continue;
             slot.process = undefined;
             if (!this.disposed) {
-                slot.state = 'error';
-                slot.error = error.message;
-                this.lastError = error.message;
-                this.host.log.warn(`antigravity-acp: [${slot.layout.id}] ${error.message}`);
+                if (proc.intentionalStop) {
+                    // The sweep or a dispose closed this process; nothing failed.
+                    slot.state = 'idle';
+                    slot.error = undefined;
+                }
+                else {
+                    slot.state = 'error';
+                    slot.error = error.message;
+                    this.lastError = error.message;
+                    this.host.log.warn(`antigravity-acp: [${slot.layout.id}] ${error.message}`);
+                }
             }
         }
         for (const conv of this.conversations.values()) {

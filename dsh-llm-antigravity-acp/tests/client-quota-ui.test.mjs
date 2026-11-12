@@ -592,31 +592,34 @@ const catalogStatus = (visibleModels) => ({
 
 })
 
-test('the Antigravity card registers on the Models page and summarizes the allowlist', async () => {
+test('the Antigravity card lists every advertised model with its exposure state', async () => {
   const { registered, mount } = loadClientPlugin({
     language: 'zh-CN',
     remoteService: { status: async () => catalogStatus(['claude-opus-5-5']) },
   })
   const slot = registered.get('settings.models.provider-card')
-  assert.ok(slot, 'the selection block registers on settings.models.provider-card')
+  assert.ok(slot, 'the card registers on settings.models.provider-card')
   assert.equal(slot.meta.key, 'llm-antigravity-acp')
   const view = mount(slot.Component, { ...slot.meta.inject(), open: true })
   await flush()
-  assert.match(textOf(view.tree), /已选 1 \/ 2 个模型/)
-  assert.match(textOf(view.tree), /claude-opus-5-5/)
-  assert.ok(!textOf(view.tree).includes('gemini-4-argon'), 'a hidden family stays off the selected rows')
+  // One catalog row per advertised model, including the family the allowlist
+  // currently hides, so a hidden model can be turned back on from the panel.
+  const ids = findAll(view.tree, (n) => n.tag === 'input' && n.props.readOnly === true).map((n) => n.props.value)
+  assert.deepEqual(ids, ['gemini-4-argon', 'claude-opus-5-5'])
+  assert.match(textOf(view.tree), /1 \/ 2 个模型对外/)
+  const switches = findAll(view.tree, (n) => n.props.role === 'switch')
+  assert.deepEqual(switches.map((n) => n.props['aria-checked']), ['false', 'true'])
   view.unmount()
 })
 
-test('fetching the catalog writes the provider allowlist through configure', async () => {
+test('turning a model off and saving writes the provider allowlist through configure', async () => {
   const patches = []
   const { registered, mount } = loadClientPlugin({
     language: 'zh-CN',
     remoteService: {
       status: async () => catalogStatus([]),
-      warmup: async () => catalogStatus([]),
       configure: async (patch) => {
-        patches.push(patch)
+        patches.push(JSON.parse(JSON.stringify(patch)))
         return catalogStatus(patch.visibleModels || [])
       },
     },
@@ -624,22 +627,17 @@ test('fetching the catalog writes the provider allowlist through configure', asy
   const slot = registered.get('settings.models.provider-card')
   const view = mount(slot.Component, { ...slot.meta.inject(), open: true })
   await flush()
-  const fetch = findAll(view.tree, (node) => node.tag === 'button' && textOf(node).includes('获取可用模型'))[0]
-  fetch.props.onClick()
+  const switches = findAll(view.tree, (n) => n.props.role === 'switch')
+  assert.equal(switches.length, 2)
+  switches[1].props.onClick()
   await flush()
-  const dialog = findOne(view.tree, (node) => node.props && node.props.role === 'dialog')
-  assert.ok(dialog, 'fetch models opens the selection modal')
-  const checks = findAll(dialog, (node) => node.props && node.props.type === 'checkbox')
-  assert.equal(checks.length, 2)
-  checks[1].props.onChange()
+  assert.deepEqual(patches, [], 'the switch is a draft until 保存')
+  findOne(view.tree, (n) => n.tag === 'button' && textOf(n) === '保存').props.onClick()
   await flush()
-  const reopened = findOne(view.tree, (node) => node.props && node.props.role === 'dialog')
-  const update = findAll(reopened, (node) => node.tag === 'button' && textOf(node).includes('更新列表'))[0]
-  update.props.onClick()
-  await flush()
-  assert.deepEqual([...patches.at(-1).visibleModels], ['gemini-4-argon'])
+  assert.deepEqual(patches.at(-1), { visibleModels: ['gemini-4-argon'] })
   view.unmount()
 })
+
 
 test('the settings tab renders the same provider block as the Models card', async () => {
   const { registered, mount } = loadClientPlugin({
@@ -688,9 +686,9 @@ test('settings.models.provider-card stays collapsed when open is false and expan
     open: true,
   })
   await flush()
-  assert.match(textOf(expanded.tree), /全部 2 个模型/)
-  // The rename fields and the allowlist block each read status once.
-  assert.equal(statusCalls, 2)
+  assert.match(textOf(expanded.tree), /全部 2 个模型对外/)
+  // One catalog: the panel reads the snapshot once for every row it draws.
+  assert.equal(statusCalls, 1)
   expanded.unmount()
 })
 
@@ -870,7 +868,7 @@ test('the Models card draws its editor with the Models page own classes', async 
   assert.equal(textOf(byClass('zGbnIq_editorTitle')), 'Antigravity')
   assert.equal(textOf(byClass('zGbnIq_editorRoute')), 'antigravity')
   assert.deepEqual(findAll(view.tree, (n) => n.props.className === 'zGbnIq_fieldLabel').map(textOf), ['显示名称'])
-  assert.equal(findAll(view.tree, (n) => n.props.className === 'zGbnIq_modelField').length, 1, 'only the enabled model gets a rename row')
+  assert.equal(findAll(view.tree, (n) => n.props.className === 'zGbnIq_modelField').length, 4, 'each of the two model rows carries an id cell and a name cell')
   assert.equal(textOf(byClass('zGbnIq_editorActions')).replace(/\s/g, ''), '取消保存')
   // The allowlist is this package's own feature, but it is drawn with the
   // page's classes too: no second visual language inside the panel.

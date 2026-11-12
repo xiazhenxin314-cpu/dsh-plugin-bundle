@@ -128,6 +128,12 @@ window.__ModuleLoader__.load({
       '.dsh-agy-input:hover:not(:disabled){border-color:var(--dsw-alias-label-tertiary, color-mix(in srgb, currentColor 32%, transparent))}',
       '.dsh-agy-input:focus-visible{border-color:var(--dsw-alias-state-business-primary, #4176e6);box-shadow:0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 18%, transparent)}',
       '.dsh-agy-seat-body{display:flex;flex-direction:column;gap:10px;min-width:0}',
+      '.dsh-agy-switch{box-sizing:border-box;position:relative;flex:0 0 auto;width:34px;height:20px;padding:0;border:0;border-radius:999px;background:var(--dsw-alias-border-l3, color-mix(in srgb, currentColor 26%, transparent));cursor:pointer;transition:background 120ms ease}',
+      '.dsh-agy-switch[data-on="true"]{background:var(--dsw-alias-button-primary-fill, var(--dsw-alias-state-business-primary, #4176e6))}',
+      '.dsh-agy-switch:after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--dsw-alias-label-primary-foreground, #fff);transition:transform 120ms ease}',
+      '.dsh-agy-switch[data-on="true"]:after{transform:translateX(14px)}',
+      '.dsh-agy-switch:focus-visible{outline:none;box-shadow:0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary, #4176e6))}',
+      '.dsh-agy-switch:disabled{opacity:.4;cursor:default}',
       '.dsh-agy-seat-body .dsh-agy-card > .dsh-agy-field{min-height:42px;padding:8px 10px;justify-content:center}',
       '.dsh-agy-field{display:flex;flex-direction:column;gap:4px;min-width:0}',
       '.antigravity-settings-card .dsh-agy-card > .dsh-agy-field{min-height:42px;padding:8px 10px;justify-content:center}',
@@ -339,25 +345,52 @@ window.__ModuleLoader__.load({
     /** Trim and collapse the whitespace a name cannot keep. */
     const cleanName = (value) => String(value === undefined || value === null ? '' : value).trim().replace(/\s+/g, ' ')
 
-    /**
-     * Models the picker currently offers, so the rename rows never list a
-     * family the allowlist hides. Falls back to the full catalog on a host
-     * that reports no visibility flags.
-     */
-    function shownModels(status) {
-      const available = Array.isArray(status.availableModels) ? status.availableModels.filter((m) => m.enabled !== false) : []
-      if (available.length > 0) return available
+
+    /** Every model the ACP server advertises, with its exposure flag. */
+    function catalogModels(status) {
+      if (Array.isArray(status.availableModels) && status.availableModels.length > 0) return status.availableModels
       return Array.isArray(status.models) ? status.models : []
     }
 
-    /** The names the panel edits from: the page's own effective values. */
+    /** The names and exposure flags the panel edits from. */
     function draftFrom(status) {
-      const models = shownModels(status)
+      const models = catalogModels(status)
       const displayName = typeof status.displayName === 'string' && status.displayName.length > 0 ? status.displayName : 'Antigravity'
       const names = {}
-      for (const model of models) names[model.id] = typeof model.name === 'string' ? model.name : model.id
-      const base = { displayName, names: { ...names } }
-      return { displayName, names, base }
+      const exposed = {}
+      for (const model of models) {
+        names[model.id] = typeof model.name === 'string' ? model.name : model.id
+        exposed[model.id] = model.enabled !== false
+      }
+      const base = { displayName, names: { ...names }, exposed: { ...exposed } }
+      return { displayName, names, exposed, base }
+    }
+
+    /**
+     * Re-read the catalog into an existing draft: rows the user already edited
+     * keep their text, newly advertised models arrive at their own defaults.
+     */
+    function mergeDraft(current, status) {
+      if (current === null) return draftFrom(status)
+      const models = catalogModels(status)
+      const names = {}
+      const exposed = {}
+      const baseNames = {}
+      const baseExposed = {}
+      for (const model of models) {
+        const advertised = typeof model.name === 'string' ? model.name : model.id
+        names[model.id] = typeof current.names[model.id] === 'string' ? current.names[model.id] : advertised
+        exposed[model.id] = current.exposed[model.id] !== false
+        baseNames[model.id] = advertised
+        baseExposed[model.id] = model.enabled !== false
+      }
+      const displayName = typeof current.displayName === 'string' ? current.displayName : draftFrom(status).displayName
+      return {
+        displayName,
+        names,
+        exposed,
+        base: { displayName: draftFrom(status).displayName, names: baseNames, exposed: baseExposed },
+      }
     }
 
     /** The provider line the page prints above every editor card. */
@@ -384,31 +417,90 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The page-native model catalog: a heading over one bordered row per
-     * advertised model, the id read-only and the displayed name editable.
-     * Clearing a name drops the override and the row falls back to the name
-     * the ACP server advertises.
+     * The one control the Models page does not ship. It is drawn from the
+     * page's own colour tokens so it cannot drift from the surrounding panel,
+     * and every other row cell comes from the page stylesheet.
      */
-    function ModelNameCatalog(props) {
+    function ExposeSwitch(props) {
+      return h('button', {
+        type: 'button',
+        role: 'switch',
+        className: 'dsh-agy-switch',
+        'aria-checked': props.checked === true ? 'true' : 'false',
+        'aria-label': props.label,
+        title: props.title,
+        'data-on': props.checked === true ? 'true' : 'false',
+        disabled: props.disabled === true,
+        onClick: () => props.onChange(props.checked !== true),
+      })
+    }
+
+    /**
+     * One model catalog in the page's own shape: a heading row carrying the
+     * two text actions, then one entry per advertised model with the id, the
+     * displayed name and this provider's exposure switch.
+     */
+    function ModelCatalog(props) {
       const models = Array.isArray(props.models) ? props.models : []
-      if (models.length === 0) return null
+      const on = models.filter((model) => props.exposed[model.id] !== false).length
+      const meta = on === models.length
+        ? t('All ' + models.length + ' models exposed', '全部 ' + models.length + ' 个模型对外')
+        : t(on + ' of ' + models.length + ' exposed', on + ' / ' + models.length + ' 个模型对外')
       return h('div', { className: pc('modelCatalog') },
-        h('div', { className: pc('modelCatalogHeading') },
-          h('span', { className: pc('modelCatalogTitle') }, t('Model names', '模型名称')),
-          h('span', { className: pc('advancedHint') }, t('Shown in the model picker; blank keeps the advertised name.', '显示在模型菜单；留空则用服务端名称。'))),
+        h('div', { className: pc('modelListHead') },
+          h('div', { className: pc('modelCatalogHeading') },
+            h('span', { className: pc('modelCatalogTitle') }, t('Models', '模型目录')),
+            h('span', { className: pc('modelCatalogMeta') }, meta)),
+          h('button', {
+            type: 'button',
+            className: pc('linkButton'),
+            disabled: props.disabled === true,
+            onClick: props.onResetAll,
+          }, t('Expose all', '恢复默认模型')),
+          h('button', {
+            type: 'button',
+            className: pc('linkButton'),
+            disabled: props.disabled === true || props.refreshing === true,
+            onClick: props.onRefresh,
+          }, props.refreshing === true ? t('Fetching', '获取中') : t('Fetch models', '获取可用模型'))),
         h('div', { className: pc('modelList') },
-          models.map((model) => h('div', { key: model.id, className: pc('modelEntry') },
-            h('div', { className: pc('modelField') },
-              h('span', { className: pc('modelFieldLabel') }, model.id),
-              h('input', {
-                className: pc('input'),
-                type: 'text',
-                value: typeof props.names[model.id] === 'string' ? props.names[model.id] : '',
-                placeholder: typeof model.name === 'string' ? model.name : model.id,
-                'aria-label': model.id + ' ' + t('display name', '显示名称'),
-                disabled: props.disabled === true,
-                onChange: (event) => props.onChange(model.id, event.target.value),
-              }))))))
+          models.map((model) => {
+            const checked = props.exposed[model.id] !== false
+            return h('div', { key: model.id, className: pc('modelEntry') },
+              h('div', {
+                className: pc('modelRow'),
+                style: { gridTemplateColumns: 'minmax(0, 1.4fr) minmax(0, 1fr) auto' },
+              },
+                h('div', { className: pc('modelField') },
+                  h('input', {
+                    className: pc('input'),
+                    type: 'text',
+                    value: model.id,
+                    readOnly: true,
+                    'aria-label': model.id,
+                    title: t('The id the ACP server advertises', 'ACP 服务端公布的模型 id'),
+                  })),
+                h('div', { className: pc('modelField') },
+                  h('input', {
+                    className: pc('input'),
+                    type: 'text',
+                    value: typeof props.names[model.id] === 'string' ? props.names[model.id] : '',
+                    placeholder: typeof model.name === 'string' ? model.name : model.id,
+                    'aria-label': model.id + ' ' + t('display name', '显示名称'),
+                    disabled: props.disabled === true,
+                    onChange: (event) => props.onChangeName(model.id, event.target.value),
+                  })),
+                h(ExposeSwitch, {
+                  checked,
+                  label: (checked ? t('Stop exposing ', '停止对外提供 ') : t('Expose ', '对外提供 ')) + model.id,
+                  title: checked ? t('Shown in the model picker', '显示在模型菜单') : t('Hidden from the model picker', '不在模型菜单中显示'),
+                  // An empty allowlist means "every model", so the last one on
+                  // cannot be turned off.
+                  disabled: props.disabled === true || (checked && on <= 1),
+                  onChange: (next) => props.onExpose(model.id, next),
+                }))
+            )
+          })))
     }
 
     /**
@@ -416,25 +508,24 @@ window.__ModuleLoader__.load({
      *
      * The page never tells this seat whether the row is open (its owner props
      * are `provider/configured/keyConfigured`), so the seat watches its row:
-     * the page appends its editor to the same `<li>` only while expanded. The
+     * the page appends its editor to the same row only while expanded. The
      * page's editor for an unknown namespace is one hint line plus a disabled
      * commit button, so it is hidden once this panel has a snapshot to draw,
      * and this panel supplies the same three parts the page's own editor
-     * supplies - heading, fields, 取消/保存 - with the page's classes.
-     * Fields are a draft until 保存, exactly like the shipped cards.
+     * supplies - heading, fields, 取消/保存 - with the page's classes. Fields
+     * are a draft until 保存, exactly like the shipped cards.
      */
     function ModelsCardFields(props) {
       const [status, setStatus] = React.useState(null)
       const [draft, setDraft] = React.useState(null)
       const [observed, setObserved] = React.useState(false)
+      const [busy, setBusy] = React.useState(false)
+      const [refreshing, setRefreshing] = React.useState(false)
+      const [error, setError] = React.useState(null)
       // The page never hands this seat an `open` prop; an explicit one is read
       // anyway so the component can be driven without a live DOM.
       const expanded = props.open === true || observed
-      const [busy, setBusy] = React.useState(false)
-      const [error, setError] = React.useState(null)
       const seatRef = React.useRef(null)
-      const commitRef = React.useRef(() => Promise.resolve(true))
-      const closeRef = React.useRef(() => {})
       const statusRef = React.useRef(null)
       statusRef.current = status
 
@@ -452,7 +543,6 @@ window.__ModuleLoader__.load({
         toggle.click()
         return true
       }
-      closeRef.current = closePanel
 
       // Load the snapshot the rows are drawn from, and start every open with
       // the page's committed values so a cancelled draft never survives.
@@ -466,6 +556,11 @@ window.__ModuleLoader__.load({
         }).catch(() => { /* the rows keep the last snapshot this session saw */ })
         return () => { live = false }
       }, [expanded, props.client])
+
+      React.useEffect(() => {
+        if (expanded) return
+        setDraft(null)
+      }, [expanded])
 
       React.useEffect(() => {
         const seat = seatRef.current
@@ -519,9 +614,10 @@ window.__ModuleLoader__.load({
           setError(t('Use at most ' + MAX_NAME_LENGTH + ' characters', '最多 ' + MAX_NAME_LENGTH + ' 个字符'))
           return false
         }
+        const models = catalogModels(snapshot)
         const overrides = { ...(snapshot.modelNames && typeof snapshot.modelNames === 'object' ? snapshot.modelNames : {}) }
         let renamed = false
-        for (const model of shownModels(snapshot)) {
+        for (const model of models) {
           const value = cleanName(draft.names[model.id])
           const base = cleanName(draft.base.names[model.id])
           if (value === base) continue
@@ -533,9 +629,16 @@ window.__ModuleLoader__.load({
           if (value.length === 0) delete overrides[model.id]
           else overrides[model.id] = value
         }
+        const ids = models.map((model) => model.id)
+        const on = ids.filter((id) => draft.exposed[id] !== false)
+        const baseOn = ids.filter((id) => draft.base.exposed[id] !== false)
+        const exposureChanged = on.length !== baseOn.length || on.some((id) => baseOn.indexOf(id) < 0)
         const patch = {}
         if (displayName !== cleanName(draft.base.displayName)) patch.displayName = displayName
         if (renamed) patch.modelNames = overrides
+        // An empty allowlist means "every model", which is what "all exposed"
+        // has to write back.
+        if (exposureChanged) patch.visibleModels = on.length === ids.length ? [] : on
         if (Object.keys(patch).length === 0) return true
         setBusy(true)
         try {
@@ -557,11 +660,23 @@ window.__ModuleLoader__.load({
           setBusy(false)
         }
       }
-      commitRef.current = commit
+
+      const refresh = async () => {
+        setRefreshing(true)
+        try {
+          const next = await props.client.statusNow()
+          if (next && typeof next === 'object') {
+            setStatus(next)
+            setDraft((current) => mergeDraft(current, next))
+          }
+        } catch { /* keep the rows already drawn */ } finally {
+          setRefreshing(false)
+        }
+      }
 
       const submit = async () => {
-        const ok = await commitRef.current()
-        if (ok) closeRef.current()
+        const ok = await commit()
+        if (ok) closePanel()
       }
 
       const seat = (children) => h('div', {
@@ -590,20 +705,20 @@ window.__ModuleLoader__.load({
                 disabled: busy,
                 onChange: (next) => setDraft((current) => ({ ...current, displayName: next })),
               }),
-              h(ModelNameCatalog, {
-                models: shownModels(status),
+              h(ModelCatalog, {
+                models: catalogModels(status),
                 names: draft.names,
+                exposed: draft.exposed,
                 disabled: busy,
-                onChange: (id, next) => setDraft((current) => ({ ...current, names: { ...current.names, [id]: next } })),
-              }),
-              // The allowlist is this package's own feature, so it is the one
-              // block the page cannot draw: it is handed the page's class
-              // resolver so it renders as part of the same panel.
-              h(MS.ModelSelectionBlock, {
-                adapter: props.adapter,
-                disabled: busy,
-                nativeClass: pc,
-                onStatus: (next) => { if (next && typeof next === 'object') setStatus(next) },
+                refreshing,
+                onChangeName: (id, next) => setDraft((current) => ({ ...current, names: { ...current.names, [id]: next } })),
+                onExpose: (id, next) => setDraft((current) => ({ ...current, exposed: { ...current.exposed, [id]: next } })),
+                onResetAll: () => setDraft((current) => {
+                  const exposed = {}
+                  for (const model of catalogModels(status)) exposed[model.id] = true
+                  return { ...current, exposed }
+                }),
+                onRefresh: () => { void refresh() },
               }),
               h('p', { className: pc('advancedHint') },
                 t('Context window, the patch script and the remaining switches stay in cordis.patch.yml.',
@@ -614,7 +729,7 @@ window.__ModuleLoader__.load({
               type: 'button',
               className: pc('secondaryButton'),
               disabled: busy,
-              onClick: () => { setError(null); closeRef.current() },
+              onClick: () => { setError(null); closePanel() },
             }, t('Cancel', '取消')),
             h('button', {
               type: 'button',
@@ -623,6 +738,7 @@ window.__ModuleLoader__.load({
               onClick: () => { void submit() },
             }, busy ? t('Saving', '保存中') : t('Save', '保存')))))
     }
+
 
     /**
      * One editable text row: trims and collapses whitespace, commits on Enter

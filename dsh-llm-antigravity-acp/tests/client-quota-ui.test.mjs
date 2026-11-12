@@ -813,7 +813,7 @@ test('source bundle stays isolated when loaded beside another copy', () => {
   assert.deepEqual(loaded, ['dsh-llm-antigravity-acp', 'dsh-llm-antigravity-acp'])
 })
 
-test('the settings page renames the provider group and single models through configure', async () => {
+test('the settings page renames the provider group but leaves model names to the Models card', async () => {
   const patches = []
   const models = [{ id: 'gemini-4-argon', name: 'Gemini 4 Argon' }, { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' }]
   let displayName = 'Antigravity'
@@ -844,16 +844,12 @@ test('the settings page renames the provider group and single models through con
   field('Display name').props.onKeyDown({ key: 'Enter', preventDefault() {} })
   await flush()
   assert.deepEqual(patches[0], { displayName: '小臻 Antigravity' })
-  assert.match(textOf(view.tree), /Model names/)
-  field('gemini-4-argon name').props.onChange({ target: { value: ' Argon   高速 ' } })
-  field('gemini-4-argon name').props.onKeyDown({ key: 'Enter', preventDefault() {} })
-  await flush()
-  assert.deepEqual(patches.at(-1), { modelNames: { 'gemini-4-argon': 'Argon 高速' } })
-  // Clearing the field drops the override so the advertised name returns.
-  field('gemini-4-argon name').props.onChange({ target: { value: '' } })
-  field('gemini-4-argon name').props.onKeyDown({ key: 'Enter', preventDefault() {} })
-  await flush()
-  assert.deepEqual(patches.at(-1), { modelNames: {} })
+  // Model display names are edited on the Models page card now, next to the
+  // page's own model catalog; the Antigravity tab no longer carries a second
+  // rename list.
+  assert.doesNotMatch(textOf(view.tree), /Model names/)
+  assert.equal(field('gemini-4-argon name'), null)
+  assert.equal(patches.length, 1)
   view.unmount()
 })
 

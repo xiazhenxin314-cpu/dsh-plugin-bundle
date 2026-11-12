@@ -661,39 +661,6 @@ window.__ModuleLoader__.load({
         error ? h('div', { role: 'alert', className: 'dsh-agy-field-error' }, error) : null)
     }
 
-    /**
-     * Model directory: one row per advertised model, the id read-only and the
-     * display name editable. Clearing a name drops the override and the row
-     * falls back to the name the ACP server advertises.
-     */
-    function ModelNameList(props) {
-      const models = Array.isArray(props.models) ? props.models : []
-      if (models.length === 0) return null
-      const names = props.names || {}
-      const save = (model, next) => {
-        const value = next.trim().replace(/\s+/g, ' ')
-        const map = { ...names }
-        if (value.length === 0 || value === model.name) delete map[model.id]
-        else map[model.id] = value
-        void props.onSave(map)
-      }
-      return h('div', { className: 'dsh-agy-card' },
-        h(InfoRow, { label: t('Model names', '模型名称'), value: t('Shown in the picker', '显示在模型菜单') }),
-        ...models.map((model) => h('div', { key: model.id, className: 'dsh-agy-row' },
-          h('span', { className: 'dsh-agy-model-id' }, model.id),
-          h('span', { className: 'dsh-agy-value', style: { flex: '1 1 auto', minWidth: 0, justifyContent: 'flex-end' } },
-            h(TextField, {
-              label: model.id + ' ' + t('name', '名称'),
-              value: names[model.id] || model.name,
-              placeholder: model.name,
-              disabled: props.busy,
-              hideLabel: true,
-              wide: true,
-              allowEmpty: true,
-              onSave: (next) => save(model, next),
-            })))))
-    }
-
     const EFFORT_OPTIONS = [
       { value: 'low', label: 'Low' },
       { value: 'medium', label: 'Medium' },
@@ -872,12 +839,6 @@ window.__ModuleLoader__.load({
             adapter: antigravityModelAdapter(props.client),
             disabled: busy,
             onStatus: adoptStatus,
-          }) : null,
-          status ? h(ModelNameList, {
-            models: shownModels(status),
-            names: status.modelNames || {},
-            busy,
-            onSave: (modelNames) => void applyPatch({ modelNames }),
           }) : null,
           status ? h(LocalLabel, { value: status.accountLabel || '', busy, onSave: (accountLabel) => applyPatch({ accountLabel }) }) : null),
         error ? h('div', { role: 'alert', style: { color: '#d9534f', fontSize: 12 } }, error) : null)

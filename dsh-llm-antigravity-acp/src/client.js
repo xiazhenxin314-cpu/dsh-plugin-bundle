@@ -127,6 +127,8 @@ window.__ModuleLoader__.load({
       '.dsh-agy-input::placeholder{color:var(--dsw-alias-label-tertiary)}',
       '.dsh-agy-input:hover:not(:disabled){border-color:var(--dsw-alias-label-tertiary, color-mix(in srgb, currentColor 32%, transparent))}',
       '.dsh-agy-input:focus-visible{border-color:var(--dsw-alias-state-business-primary, #4176e6);box-shadow:0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 18%, transparent)}',
+      '.dsh-agy-seat-body{display:flex;flex-direction:column;gap:10px;min-width:0}',
+      '.dsh-agy-seat-body .dsh-agy-card > .dsh-agy-field{min-height:42px;padding:8px 10px;justify-content:center}',
       '.dsh-agy-field{display:flex;flex-direction:column;gap:4px;min-width:0}',
       '.antigravity-settings-card .dsh-agy-card > .dsh-agy-field{min-height:42px;padding:8px 10px;justify-content:center}',
       '.dsh-agy-field-error{font-size:11px;line-height:16px;color:var(--dsw-alias-state-error-primary, #d9534f)}',
@@ -322,6 +324,17 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Models the picker currently offers, so the rename rows never list a
+     * family the allowlist hides. Falls back to the full catalog on a host
+     * that reports no visibility flags.
+     */
+    function shownModels(status) {
+      const available = Array.isArray(status.availableModels) ? status.availableModels.filter((m) => m.enabled !== false) : []
+      if (available.length > 0) return available
+      return Array.isArray(status.models) ? status.models : []
+    }
+
+    /**
      * Model directory: one row per advertised model, the id read-only and the
      * display name editable. Clearing a name drops the override and the row
      * falls back to the name the ACP server advertises.
@@ -352,6 +365,94 @@ window.__ModuleLoader__.load({
               allowEmpty: true,
               onSave: (next) => save(model, next),
             })))))
+    }
+
+    /**
+     * The Models page card's extension seat. The host renders this seat inside
+     * the provider card but OUTSIDE the edit panel and never tells it whether
+     * the row is expanded, so the seat watches its own place in the DOM: the
+     * editor is appended right after it, which makes "something follows me" the
+     * expanded signal. Collapsed renders nothing, so the row matches every
+     * other provider.
+     */
+    function ExpandedOnly(props) {
+      const ref = React.useRef(null)
+      const [observed, setObserved] = React.useState(false)
+      const expanded = props.open === true || observed
+      React.useEffect(() => {
+        const element = ref.current
+        if (!element || typeof element.parentElement === 'undefined' || element.parentElement === null) return undefined
+        if (typeof MutationObserver === 'undefined') return undefined
+        const parent = element.parentElement
+        const sync = () => setObserved(element.nextElementSibling !== null)
+        const observer = new MutationObserver(sync)
+        observer.observe(parent, { childList: true })
+        sync()
+        return () => observer.disconnect()
+      }, [])
+      return h('div', {
+        ref,
+        className: 'dsh-agy-seat',
+        style: expanded ? undefined : { display: 'none' },
+      }, expanded ? props.children : null)
+    }
+
+    /**
+     * Real editable fields for the Models page card: the host's own editor has
+     * no layout for this provider family and can only point at
+     * cordis.patch.yml, so the names and the allowlist live here instead.
+     */
+    function ModelsCardExtras(props) {
+      // The fields mount only while the host row is expanded, so a collapsed
+      // card costs no status call and renders exactly like every other row.
+      return h(ExpandedOnly, { open: props.open },
+        h(ModelsCardFields, { client: props.client, adapter: props.adapter }))
+    }
+
+    /** The Models page card's editable fields, mounted only while expanded. */
+    function ModelsCardFields(props) {
+      const [status, setStatus] = React.useState(null)
+      const [busy, setBusy] = React.useState(false)
+      const [error, setError] = React.useState(null)
+      React.useEffect(() => {
+        let live = true
+        props.client.statusNow().then((s) => { if (live && s) setStatus(s) }).catch(() => { /* the rows fall back to the stored copy */ })
+        return () => { live = false }
+      }, [props.client])
+      const applyPatch = async (patch) => {
+        setBusy(true)
+        try {
+          const next = await props.client.configure(patch)
+          setStatus(next)
+          setError(next && next.error ? next.error : null)
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e))
+        } finally {
+          setBusy(false)
+        }
+      }
+      if (status === null) return null
+      return h('div', { className: 'dsh-agy-seat-body' },
+        h('div', { className: 'dsh-agy-card' },
+          h(TextField, {
+            label: t('Display name', '显示名称'),
+            value: status.displayName || 'Antigravity',
+            placeholder: 'Antigravity',
+            disabled: busy,
+            onSave: (displayName) => void applyPatch({ displayName }),
+          })),
+        h(ModelNameList, {
+          models: shownModels(status),
+          names: status.modelNames || {},
+          busy,
+          onSave: (modelNames) => void applyPatch({ modelNames }),
+        }),
+          h(MS.ModelSelectionBlock, {
+            adapter: props.adapter,
+            disabled: busy,
+            onStatus: (s) => { if (s && typeof s === 'object') setStatus(s) },
+          }),
+          error ? h('div', { role: 'alert', className: 'dsh-agy-field-error' }, error) : null)
     }
 
     const EFFORT_OPTIONS = [
@@ -534,7 +635,7 @@ window.__ModuleLoader__.load({
             onStatus: adoptStatus,
           }) : null,
           status ? h(ModelNameList, {
-            models: status.models || [],
+            models: shownModels(status),
             names: status.modelNames || {},
             busy,
             onSave: (modelNames) => void applyPatch({ modelNames }),
@@ -681,8 +782,8 @@ window.__ModuleLoader__.load({
         ctx.effect(() => ctx.slots.inject('settings.models.provider-card', () => ctx.slots.register({
           name: 'settings.models.provider-card',
           key: 'llm-antigravity-acp',
-          inject: () => ({ adapter: antigravityModelAdapter(client) }),
-        }, MS.ModelSelectionBlock)), 'antigravity-acp: model catalog card')
+          inject: () => ({ adapter: antigravityModelAdapter(client), client }),
+        }, ModelsCardExtras)), 'antigravity-acp: model catalog card')
         ctx.inject(['slots', 'modelDirectories'], (scope) => {
           scope.effect(() => scope.slots.inject('conversation.input.model.parameters', () => scope.slots.register({
             name: 'conversation.input.model.parameters',

@@ -600,7 +600,7 @@ test('the Antigravity card registers on the Models page and summarizes the allow
   const slot = registered.get('settings.models.provider-card')
   assert.ok(slot, 'the selection block registers on settings.models.provider-card')
   assert.equal(slot.meta.key, 'llm-antigravity-acp')
-  const view = mount(slot.Component, slot.meta.inject())
+  const view = mount(slot.Component, { ...slot.meta.inject(), open: true })
   await flush()
   assert.match(textOf(view.tree), /已选 1 \/ 2 个模型/)
   assert.match(textOf(view.tree), /claude-opus-5-5/)
@@ -622,7 +622,7 @@ test('fetching the catalog writes the provider allowlist through configure', asy
     },
   })
   const slot = registered.get('settings.models.provider-card')
-  const view = mount(slot.Component, slot.meta.inject())
+  const view = mount(slot.Component, { ...slot.meta.inject(), open: true })
   await flush()
   const fetch = findAll(view.tree, (node) => node.tag === 'button' && textOf(node).includes('获取可用模型'))[0]
   fetch.props.onClick()
@@ -675,7 +675,8 @@ test('settings.models.provider-card stays collapsed when open is false and expan
     open: false,
   })
   await flush()
-  assert.equal(collapsed.tree, null, 'collapsed row card renders nothing outside rowHead')
+  assert.equal(collapsed.tree.props.style.display, 'none', 'collapsed row card keeps its seat hidden')
+  assert.equal(textOf(collapsed.tree), '', 'collapsed row card renders no fields')
   assert.equal(statusCalls, 0, 'collapsed row card avoids eager status RPCs')
   collapsed.unmount()
 
@@ -688,7 +689,8 @@ test('settings.models.provider-card stays collapsed when open is false and expan
   })
   await flush()
   assert.match(textOf(expanded.tree), /全部 2 个模型/)
-  assert.equal(statusCalls, 1)
+  // The rename fields and the allowlist block each read status once.
+  assert.equal(statusCalls, 2)
   expanded.unmount()
 })
 
@@ -715,7 +717,8 @@ test('the seat passes no open prop, so the Models page card stays collapsed', as
     keyConfigured: false,
   })
   await flush()
-  assert.equal(view.tree, null, 'an absent open prop keeps the provider row collapsed')
+  assert.equal(view.tree.props.style.display, 'none', 'an absent open prop keeps the provider row collapsed')
+  assert.equal(textOf(view.tree), '', 'a collapsed provider row renders no fields')
   assert.equal(statusCalls, 0, 'a collapsed provider row never calls status')
   view.unmount()
 })

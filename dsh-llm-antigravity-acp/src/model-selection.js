@@ -200,6 +200,39 @@ function createModelSelection(deps) {
     const externalDisabled = props.disabled === true
     const isCompact = props.compact === true
     const isDraftControlled = Array.isArray(props.draftIds) && typeof props.onDraftChange === 'function'
+    // On the Models page this block is drawn with the page's own class names
+    // (the caller passes its resolver) so it reads as one panel with the page's
+    // fields instead of introducing a second visual language. The Settings tab
+    // keeps this package's own classes.
+    const nativeClass = typeof props.nativeClass === 'function' ? props.nativeClass : null
+    const NATIVE_CLASS = {
+      '': 'modelCatalog',
+      head: 'modelListHead',
+      title: 'modelCatalogTitle',
+      meta: 'advancedHint',
+      desc: 'advancedHint',
+      rows: 'modelList',
+      row: 'modelEntry',
+      id: 'candidateId',
+      name: 'advancedHint',
+      remove: 'iconButton',
+      footer: null,
+      'add-trigger': 'addModelButton',
+      'add-drawer': null,
+      'add-option': 'linkButton',
+      empty: 'modelEmpty',
+      error: 'error',
+      actions: null,
+    }
+    const cls = (key) => {
+      if (nativeClass === null) return 'dsh-modelselection' + (key === '' ? '' : '-' + key)
+      const name = NATIVE_CLASS[key]
+      return name === null || name === undefined ? undefined : nativeClass(name)
+    }
+    // A page-native model entry is a plain bordered box; the row inside it
+    // needs the same flex line the Settings tab gets from its own stylesheet.
+    const rowStyle = nativeClass === null ? undefined : { display: 'flex', alignItems: 'center', gap: '8px', padding: '2px 4px' }
+    const drawerStyle = nativeClass === null ? undefined : { display: 'flex', flexDirection: 'column', gap: '2px', paddingTop: '4px' }
     // On the Models settings page (`settings.models.provider-card`), stay
     // collapsed like every other provider row until the host says the row is
     // being edited. The seat's owner props are only
@@ -376,16 +409,16 @@ function createModelSelection(deps) {
     if (collapsedOnModelsPage) return null
 
     return h('section', {
-      className: isCompact ? 'dsh-modelselection dsh-modelselection-compact' : 'dsh-modelselection',
+      className: nativeClass === null ? (isCompact ? 'dsh-modelselection dsh-modelselection-compact' : 'dsh-modelselection') : cls(''),
       'aria-label': adapter.title || t('Models', '模型'),
     },
-      h('div', { className: 'dsh-modelselection-head' },
-        h('span', { className: 'dsh-modelselection-title' }, adapter.title || t('Models', '模型')),
+      h('div', { className: cls('head') },
+        h('span', { className: cls('title') }, adapter.title || t('Models', '模型')),
         h('span', {
-          className: customized ? 'dsh-modelselection-meta dsh-modelselection-meta-custom' : 'dsh-modelselection-meta',
+          className: nativeClass === null ? (customized ? 'dsh-modelselection-meta dsh-modelselection-meta-custom' : 'dsh-modelselection-meta') : cls('meta'),
         }, summary),
-        adapter.subtitle === undefined ? null : h('span', { className: 'dsh-modelselection-name' }, adapter.subtitle),
-        h('span', { className: 'dsh-modelselection-actions' },
+        adapter.subtitle === undefined ? null : h('span', { className: cls('name') }, adapter.subtitle),
+        h('span', { className: cls('actions') },
           customized
             ? h(Button, {
               variant: 'ghost',
@@ -400,18 +433,18 @@ function createModelSelection(deps) {
             disabled: busy || externalDisabled,
             onClick: () => void fetchModels(),
           }, t('Fetch models', '获取可用模型')))),
-      adapter.description ? h('p', { className: 'dsh-modelselection-desc' }, adapter.description) : null,
+      adapter.description ? h('p', { className: cls('desc') }, adapter.description) : null,
       candidates.length === 0
-        ? h('p', { className: 'dsh-modelselection-empty' }, t('Use “Fetch models” to read this provider’s catalog.', '点击「获取可用模型」读取该提供商的实时模型目录'))
-        : h('div', { className: 'dsh-modelselection-rows' },
+        ? h('p', { className: cls('empty') }, t('Use “Fetch models” to read this provider’s catalog.', '点击「获取可用模型」读取该提供商的实时模型目录'))
+        : h('div', { className: cls('rows') },
           ...checked.map((id) => {
             const model = candidates.filter((candidate) => candidate.id === id)[0]
-            return h('div', { key: id, className: 'dsh-modelselection-row' },
-              h('code', { className: 'dsh-modelselection-id' }, id),
-              h('span', { className: 'dsh-modelselection-name' }, model && model.name && model.name !== id ? model.name : ''),
+            return h('div', { key: id, className: cls('row'), style: rowStyle },
+              h('code', { className: cls('id') }, id),
+              h('span', { className: cls('name') }, model && model.name && model.name !== id ? model.name : ''),
               h('button', {
                 type: 'button',
-                className: 'dsh-modelselection-remove',
+                className: cls('remove'),
                 'aria-label': t(`Remove ${id}`, `移除 ${id}`),
                 title: checked.length <= 1
                   ? t('Keep at least one model enabled', '请至少保留一个启用的模型')
@@ -421,10 +454,10 @@ function createModelSelection(deps) {
               }, closeIcon()))
           }),
           unpicked.length > 0
-            ? h('div', { className: 'dsh-modelselection-footer' },
+            ? h('div', { className: cls('footer') },
               h('button', {
                 type: 'button',
-                className: 'dsh-modelselection-add-trigger',
+                className: cls('add-trigger'),
                 disabled: busy || externalDisabled,
                 onClick: () => {
                   if (unpicked.length <= INLINE_ADD_LIMIT) setAddingInline(!addingInline)
@@ -436,22 +469,22 @@ function createModelSelection(deps) {
                   ? t('Hide available models', '收起可添加模型')
                   : t(`Add model (${unpicked.length} available)`, `添加模型（还有 ${unpicked.length} 个可选）`)),
               addingInline && unpicked.length <= INLINE_ADD_LIMIT
-                ? h('div', { className: 'dsh-modelselection-add-drawer' }, ...unpicked.map((candidate) =>
+                ? h('div', { className: cls('add-drawer'), style: drawerStyle }, ...unpicked.map((candidate) =>
                   h('button', {
                     key: candidate.id,
                     type: 'button',
-                    className: 'dsh-modelselection-add-option',
+                    className: cls('add-option'),
                     disabled: busy || externalDisabled,
                     onClick: () => void addInline(candidate.id),
                   },
                     plusIcon(),
-                    h('code', { className: 'dsh-modelselection-id' }, candidate.id),
+                    h('code', { className: cls('id') }, candidate.id),
                     candidate.name && candidate.name !== candidate.id
-                      ? h('span', { className: 'dsh-modelselection-name' }, candidate.name)
+                      ? h('span', { className: cls('name') }, candidate.name)
                       : null)))
                 : null)
             : null),
-      failure ? h('p', { role: 'alert', className: 'dsh-modelselection-error' }, failure) : null,
+      failure ? h('p', { role: 'alert', className: cls('error') }, failure) : null,
       h(Modal, {
         open,
         onClose: close,

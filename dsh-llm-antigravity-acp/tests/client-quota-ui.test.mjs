@@ -856,3 +856,71 @@ test('the settings page renames the provider group and single models through con
   assert.deepEqual(patches.at(-1), { modelNames: {} })
   view.unmount()
 })
+
+test('the Models card draws its editor with the Models page own classes', async () => {
+  const { registered, mount } = loadClientPlugin({
+    language: 'zh-CN',
+    remoteService: { status: async () => catalogStatus(['claude-opus-5-5']) },
+  })
+  const slot = registered.get('settings.models.provider-card')
+  const view = mount(slot.Component, { ...slot.meta.inject(), open: true })
+  await flush()
+  const byClass = (name) => findOne(view.tree, (n) => typeof n.props.className === 'string' && n.props.className.split(' ').includes(name))
+  // The panel is the page's own editor shell, its own collapsible, its own
+  // field rows and its own action row - no bespoke markup of ours.
+  assert.ok(byClass('zGbnIq_editor'), 'the panel mounts inside the page editor shell')
+  assert.ok(byClass('zGbnIq_customized'), 'the fields sit in the page collapsible')
+  assert.equal(textOf(byClass('zGbnIq_customizedSummary')), '自定义设置')
+  assert.equal(textOf(byClass('zGbnIq_editorTitle')), 'Antigravity')
+  assert.equal(textOf(byClass('zGbnIq_editorRoute')), 'antigravity')
+  assert.deepEqual(findAll(view.tree, (n) => n.props.className === 'zGbnIq_fieldLabel').map(textOf), ['显示名称'])
+  assert.equal(findAll(view.tree, (n) => n.props.className === 'zGbnIq_modelField').length, 1, 'only the enabled model gets a rename row')
+  assert.equal(textOf(byClass('zGbnIq_editorActions')).replace(/\s/g, ''), '取消保存')
+  // The allowlist is this package's own feature, but it is drawn with the
+  // page's classes too: no second visual language inside the panel.
+  assert.equal(findAll(view.tree, (n) => typeof n.props.className === 'string' && n.props.className.includes('dsh-modelselection-')).length, 0)
+  view.unmount()
+})
+
+test('the Models card holds edits in a draft, saves them through configure and drops them on cancel', async () => {
+  const patches = []
+  let displayName = 'Antigravity'
+  let modelNames = {}
+  const advertised = [{ id: 'gemini-4-argon', name: 'Gemini 4 Argon' }, { id: 'claude-opus-5-5', name: 'Claude Opus 5.5' }]
+  const snapshot = () => ({
+    ...catalogStatus([]),
+    displayName,
+    modelNames,
+    models: advertised.map((model) => ({ ...model, name: modelNames[model.id] || model.name })),
+  })
+  const { registered, mount } = loadClientPlugin({
+    language: 'zh-CN',
+    remoteService: {
+      status: async () => snapshot(),
+      configure: async (patch) => {
+        patches.push(JSON.parse(JSON.stringify(patch)))
+        if (patch.displayName !== undefined) displayName = patch.displayName
+        if (patch.modelNames !== undefined) modelNames = patch.modelNames
+        return snapshot()
+      },
+    },
+  })
+  const slot = registered.get('settings.models.provider-card')
+  const view = mount(slot.Component, { ...slot.meta.inject(), open: true })
+  await flush()
+  const field = (label) => findOne(view.tree, (n) => n.tag === 'input' && n.props['aria-label'] === label)
+  field('显示名称').props.onChange({ target: { value: '  小臻   Antigravity ' } })
+  field('gemini-4-argon 显示名称').props.onChange({ target: { value: ' Argon   高速 ' } })
+  await flush()
+  assert.deepEqual(patches, [], 'a draft never writes on change')
+  findOne(view.tree, (n) => n.tag === 'button' && textOf(n) === '保存').props.onClick()
+  await flush()
+  assert.deepEqual(patches.at(-1), { displayName: '小臻 Antigravity', modelNames: { 'gemini-4-argon': 'Argon 高速' } })
+  // A cancelled draft is discarded, and clearing a name drops its override.
+  field('gemini-4-argon 显示名称').props.onChange({ target: { value: '' } })
+  await flush()
+  const before = patches.length
+  findOne(view.tree, (n) => n.tag === 'button' && textOf(n) === '取消').props.onClick()
+  await flush()
+  assert.equal(patches.length, before, '取消 writes nothing')
+})

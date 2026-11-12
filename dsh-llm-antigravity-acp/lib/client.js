@@ -201,6 +201,39 @@ function createModelSelection(deps) {
     const externalDisabled = props.disabled === true
     const isCompact = props.compact === true
     const isDraftControlled = Array.isArray(props.draftIds) && typeof props.onDraftChange === 'function'
+    // On the Models page this block is drawn with the page's own class names
+    // (the caller passes its resolver) so it reads as one panel with the page's
+    // fields instead of introducing a second visual language. The Settings tab
+    // keeps this package's own classes.
+    const nativeClass = typeof props.nativeClass === 'function' ? props.nativeClass : null
+    const NATIVE_CLASS = {
+      '': 'modelCatalog',
+      head: 'modelListHead',
+      title: 'modelCatalogTitle',
+      meta: 'advancedHint',
+      desc: 'advancedHint',
+      rows: 'modelList',
+      row: 'modelEntry',
+      id: 'candidateId',
+      name: 'advancedHint',
+      remove: 'iconButton',
+      footer: null,
+      'add-trigger': 'addModelButton',
+      'add-drawer': null,
+      'add-option': 'linkButton',
+      empty: 'modelEmpty',
+      error: 'error',
+      actions: null,
+    }
+    const cls = (key) => {
+      if (nativeClass === null) return 'dsh-modelselection' + (key === '' ? '' : '-' + key)
+      const name = NATIVE_CLASS[key]
+      return name === null || name === undefined ? undefined : nativeClass(name)
+    }
+    // A page-native model entry is a plain bordered box; the row inside it
+    // needs the same flex line the Settings tab gets from its own stylesheet.
+    const rowStyle = nativeClass === null ? undefined : { display: 'flex', alignItems: 'center', gap: '8px', padding: '2px 4px' }
+    const drawerStyle = nativeClass === null ? undefined : { display: 'flex', flexDirection: 'column', gap: '2px', paddingTop: '4px' }
     // On the Models settings page (`settings.models.provider-card`), stay
     // collapsed like every other provider row until the host says the row is
     // being edited. The seat's owner props are only
@@ -377,16 +410,16 @@ function createModelSelection(deps) {
     if (collapsedOnModelsPage) return null
 
     return h('section', {
-      className: isCompact ? 'dsh-modelselection dsh-modelselection-compact' : 'dsh-modelselection',
+      className: nativeClass === null ? (isCompact ? 'dsh-modelselection dsh-modelselection-compact' : 'dsh-modelselection') : cls(''),
       'aria-label': adapter.title || t('Models', '模型'),
     },
-      h('div', { className: 'dsh-modelselection-head' },
-        h('span', { className: 'dsh-modelselection-title' }, adapter.title || t('Models', '模型')),
+      h('div', { className: cls('head') },
+        h('span', { className: cls('title') }, adapter.title || t('Models', '模型')),
         h('span', {
-          className: customized ? 'dsh-modelselection-meta dsh-modelselection-meta-custom' : 'dsh-modelselection-meta',
+          className: nativeClass === null ? (customized ? 'dsh-modelselection-meta dsh-modelselection-meta-custom' : 'dsh-modelselection-meta') : cls('meta'),
         }, summary),
-        adapter.subtitle === undefined ? null : h('span', { className: 'dsh-modelselection-name' }, adapter.subtitle),
-        h('span', { className: 'dsh-modelselection-actions' },
+        adapter.subtitle === undefined ? null : h('span', { className: cls('name') }, adapter.subtitle),
+        h('span', { className: cls('actions') },
           customized
             ? h(Button, {
               variant: 'ghost',
@@ -401,18 +434,18 @@ function createModelSelection(deps) {
             disabled: busy || externalDisabled,
             onClick: () => void fetchModels(),
           }, t('Fetch models', '获取可用模型')))),
-      adapter.description ? h('p', { className: 'dsh-modelselection-desc' }, adapter.description) : null,
+      adapter.description ? h('p', { className: cls('desc') }, adapter.description) : null,
       candidates.length === 0
-        ? h('p', { className: 'dsh-modelselection-empty' }, t('Use “Fetch models” to read this provider’s catalog.', '点击「获取可用模型」读取该提供商的实时模型目录'))
-        : h('div', { className: 'dsh-modelselection-rows' },
+        ? h('p', { className: cls('empty') }, t('Use “Fetch models” to read this provider’s catalog.', '点击「获取可用模型」读取该提供商的实时模型目录'))
+        : h('div', { className: cls('rows') },
           ...checked.map((id) => {
             const model = candidates.filter((candidate) => candidate.id === id)[0]
-            return h('div', { key: id, className: 'dsh-modelselection-row' },
-              h('code', { className: 'dsh-modelselection-id' }, id),
-              h('span', { className: 'dsh-modelselection-name' }, model && model.name && model.name !== id ? model.name : ''),
+            return h('div', { key: id, className: cls('row'), style: rowStyle },
+              h('code', { className: cls('id') }, id),
+              h('span', { className: cls('name') }, model && model.name && model.name !== id ? model.name : ''),
               h('button', {
                 type: 'button',
-                className: 'dsh-modelselection-remove',
+                className: cls('remove'),
                 'aria-label': t(`Remove ${id}`, `移除 ${id}`),
                 title: checked.length <= 1
                   ? t('Keep at least one model enabled', '请至少保留一个启用的模型')
@@ -422,10 +455,10 @@ function createModelSelection(deps) {
               }, closeIcon()))
           }),
           unpicked.length > 0
-            ? h('div', { className: 'dsh-modelselection-footer' },
+            ? h('div', { className: cls('footer') },
               h('button', {
                 type: 'button',
-                className: 'dsh-modelselection-add-trigger',
+                className: cls('add-trigger'),
                 disabled: busy || externalDisabled,
                 onClick: () => {
                   if (unpicked.length <= INLINE_ADD_LIMIT) setAddingInline(!addingInline)
@@ -437,22 +470,22 @@ function createModelSelection(deps) {
                   ? t('Hide available models', '收起可添加模型')
                   : t(`Add model (${unpicked.length} available)`, `添加模型（还有 ${unpicked.length} 个可选）`)),
               addingInline && unpicked.length <= INLINE_ADD_LIMIT
-                ? h('div', { className: 'dsh-modelselection-add-drawer' }, ...unpicked.map((candidate) =>
+                ? h('div', { className: cls('add-drawer'), style: drawerStyle }, ...unpicked.map((candidate) =>
                   h('button', {
                     key: candidate.id,
                     type: 'button',
-                    className: 'dsh-modelselection-add-option',
+                    className: cls('add-option'),
                     disabled: busy || externalDisabled,
                     onClick: () => void addInline(candidate.id),
                   },
                     plusIcon(),
-                    h('code', { className: 'dsh-modelselection-id' }, candidate.id),
+                    h('code', { className: cls('id') }, candidate.id),
                     candidate.name && candidate.name !== candidate.id
-                      ? h('span', { className: 'dsh-modelselection-name' }, candidate.name)
+                      ? h('span', { className: cls('name') }, candidate.name)
                       : null)))
                 : null)
             : null),
-      failure ? h('p', { role: 'alert', className: 'dsh-modelselection-error' }, failure) : null,
+      failure ? h('p', { role: 'alert', className: cls('error') }, failure) : null,
       h(Modal, {
         open,
         onClose: close,
@@ -803,6 +836,339 @@ window.__ModuleLoader__.load({
         error ? h('div', { role: 'alert' }, error) : null)
     }
 
+    // ── The Models page's own visual language ────────────────────────────
+    //
+    // `settings.models.provider-card` gives this package a seat inside the
+    // Antigravity card, but the page draws its editor from a hand-written
+    // per-family table (`layoutOf`) that knows only `llm-deepseek` and
+    // `llm-pi-ai`: an unknown namespace gets one tertiary hint line and a
+    // commit button that is disabled by construction. Its stylesheet, though,
+    // ships as plain prefixed class names inside a `<style data-plugin>` tag,
+    // so this seat can draw the editor with the page's OWN classes instead of
+    // imitating them - same header, same 「自定义设置」collapsible, same field
+    // rows, same action row. No colour, size or radius is authored here; the
+    // only thing copied from the page is class names, which the resolver below
+    // reads at runtime so a rehashed prefix cannot silently break the look.
+    const HOST_MODELS_PLUGIN = '@deepseek-ai/dsh-client-ui-settings-models'
+    const HOST_PREFIX_FALLBACK = 'zGbnIq'
+    const MAX_NAME_LENGTH = 64
+    let hostPrefixCache = null
+
+    /**
+     * The CSS-module prefix the Models page shipped in this build.
+     * @returns the prefix every page class name is built from.
+     */
+    function hostPrefix() {
+      if (hostPrefixCache !== null) return hostPrefixCache
+      let prefix = HOST_PREFIX_FALLBACK
+      try {
+        // The page tags its stylesheet with both `data-plugin` (the package)
+        // and `data-plugin-css` (the module id); the latter is the one that
+        // survives a package rename, so it is tried first.
+        const selectors = [
+          'style[data-plugin-css*="settings-models"]',
+          'style[data-plugin="' + HOST_MODELS_PLUGIN + '"]',
+        ]
+        for (const selector of selectors) {
+          const tag = typeof document === 'undefined' ? null : document.querySelector(selector)
+          const text = tag === null || typeof tag.textContent !== 'string' ? '' : tag.textContent
+          const found = /\.([A-Za-z0-9]+)_customizedBody\b/.exec(text)
+          if (found !== null) {
+            prefix = found[1]
+            break
+          }
+        }
+      } catch { /* an unreadable sheet keeps the known prefix */ }
+      hostPrefixCache = prefix
+      return prefix
+    }
+
+    /** One class name from the Models page's stylesheet. */
+    const pc = (name) => hostPrefix() + '_' + name
+
+    /** Trim and collapse the whitespace a name cannot keep. */
+    const cleanName = (value) => String(value === undefined || value === null ? '' : value).trim().replace(/\s+/g, ' ')
+
+    /**
+     * Models the picker currently offers, so the rename rows never list a
+     * family the allowlist hides. Falls back to the full catalog on a host
+     * that reports no visibility flags.
+     */
+    function shownModels(status) {
+      const available = Array.isArray(status.availableModels) ? status.availableModels.filter((m) => m.enabled !== false) : []
+      if (available.length > 0) return available
+      return Array.isArray(status.models) ? status.models : []
+    }
+
+    /** The names the panel edits from: the page's own effective values. */
+    function draftFrom(status) {
+      const models = shownModels(status)
+      const displayName = typeof status.displayName === 'string' && status.displayName.length > 0 ? status.displayName : 'Antigravity'
+      const names = {}
+      for (const model of models) names[model.id] = typeof model.name === 'string' ? model.name : model.id
+      const base = { displayName, names: { ...names } }
+      return { displayName, names, base }
+    }
+
+    /** The provider line the page prints above every editor card. */
+    function ProviderHeading(props) {
+      return h('div', { className: pc('editorHeader') },
+        h('span', { className: pc('editorTitle') }, props.displayName),
+        props.route !== props.displayName ? h('span', { className: pc('editorRoute') }, props.route) : null)
+    }
+
+    /** One page-native label + input row (`field` / `fieldLabel` / `input`). */
+    function FieldRow(props) {
+      return h('div', { className: pc('field') },
+        h('span', { className: pc('fieldLabel') }, props.label),
+        h('input', {
+          className: pc('input'),
+          type: 'text',
+          value: props.value,
+          placeholder: props.placeholder || '',
+          'aria-label': props.label,
+          disabled: props.disabled === true,
+          onChange: (event) => props.onChange(event.target.value),
+        }),
+        props.hint ? h('span', { className: pc('advancedHint') }, props.hint) : null)
+    }
+
+    /**
+     * The page-native model catalog: a heading over one bordered row per
+     * advertised model, the id read-only and the displayed name editable.
+     * Clearing a name drops the override and the row falls back to the name
+     * the ACP server advertises.
+     */
+    function ModelNameCatalog(props) {
+      const models = Array.isArray(props.models) ? props.models : []
+      if (models.length === 0) return null
+      return h('div', { className: pc('modelCatalog') },
+        h('div', { className: pc('modelCatalogHeading') },
+          h('span', { className: pc('modelCatalogTitle') }, t('Model names', '模型名称')),
+          h('span', { className: pc('advancedHint') }, t('Shown in the model picker; blank keeps the advertised name.', '显示在模型菜单；留空则用服务端名称。'))),
+        h('div', { className: pc('modelList') },
+          models.map((model) => h('div', { key: model.id, className: pc('modelEntry') },
+            h('div', { className: pc('modelField') },
+              h('span', { className: pc('modelFieldLabel') }, model.id),
+              h('input', {
+                className: pc('input'),
+                type: 'text',
+                value: typeof props.names[model.id] === 'string' ? props.names[model.id] : '',
+                placeholder: typeof model.name === 'string' ? model.name : model.id,
+                'aria-label': model.id + ' ' + t('display name', '显示名称'),
+                disabled: props.disabled === true,
+                onChange: (event) => props.onChange(model.id, event.target.value),
+              }))))))
+    }
+
+    /**
+     * The Models page card's editor, drawn with the page's own classes.
+     *
+     * The page never tells this seat whether the row is open (its owner props
+     * are `provider/configured/keyConfigured`), so the seat watches its row:
+     * the page appends its editor to the same `<li>` only while expanded. The
+     * page's editor for an unknown namespace is one hint line plus a disabled
+     * commit button, so it is hidden once this panel has a snapshot to draw,
+     * and this panel supplies the same three parts the page's own editor
+     * supplies - heading, fields, 取消/保存 - with the page's classes.
+     * Fields are a draft until 保存, exactly like the shipped cards.
+     */
+    function ModelsCardFields(props) {
+      const [status, setStatus] = React.useState(null)
+      const [draft, setDraft] = React.useState(null)
+      const [observed, setObserved] = React.useState(false)
+      // The page never hands this seat an `open` prop; an explicit one is read
+      // anyway so the component can be driven without a live DOM.
+      const expanded = props.open === true || observed
+      const [busy, setBusy] = React.useState(false)
+      const [error, setError] = React.useState(null)
+      const seatRef = React.useRef(null)
+      const commitRef = React.useRef(() => Promise.resolve(true))
+      const closeRef = React.useRef(() => {})
+      const statusRef = React.useRef(null)
+      statusRef.current = status
+
+      // The page's own close affordance: the row's 「编辑」 button toggles the
+      // editor, so activating it again is exactly what 取消 and a finished
+      // 保存 mean here. Fallbacks keep the panel reachable when the row shape
+      // changes: leave the page's editor visible and let its own 取消 close.
+      const closePanel = () => {
+        const seat = seatRef.current
+        const row = seat !== null && typeof seat.closest === 'function' ? seat.closest('li') : null
+        if (row === null) return false
+        const actions = row.querySelector('.' + pc('rowActions'))
+        const toggle = actions === null ? null : actions.querySelector('button')
+        if (toggle === null) return false
+        toggle.click()
+        return true
+      }
+      closeRef.current = closePanel
+
+      // Load the snapshot the rows are drawn from, and start every open with
+      // the page's committed values so a cancelled draft never survives.
+      React.useEffect(() => {
+        if (!expanded) return undefined
+        let live = true
+        props.client.statusNow().then((snapshot) => {
+          if (!live || !snapshot) return
+          setStatus(snapshot)
+          setDraft(draftFrom(snapshot))
+        }).catch(() => { /* the rows keep the last snapshot this session saw */ })
+        return () => { live = false }
+      }, [expanded, props.client])
+
+      React.useEffect(() => {
+        const seat = seatRef.current
+        if (!seat) return undefined
+        const row = typeof seat.closest === 'function' ? seat.closest('li') : null
+        if (!row) return undefined
+        // The page renders this seat through a wrapper element
+        // (`div[data-slot="settings.models.provider-card"]`, display:contents)
+        // and appends its provider editor to the same row only while the row is
+        // expanded, always right after that wrapper.
+        const wrapper = typeof seat.closest === 'function' ? seat.closest('[data-slot="settings.models.provider-card"]') : null
+        let hidden = null
+        const sync = () => {
+          const last = wrapper !== null && wrapper !== undefined ? wrapper.nextElementSibling : null
+          const open = last !== null && last !== undefined && !last.contains(seat)
+          setObserved(open)
+          if (!open) return
+          // Hide the page's own editor for this namespace only after this
+          // panel can close the row itself; otherwise its hint and disabled
+          // commit button stay as the fallback.
+          if (hidden === last) return
+          if (statusRef.current === null) return
+          if (row.querySelector('.' + pc('rowActions') + ' button') === null) return
+          hidden = last
+          last.style.display = 'none'
+        }
+        sync()
+        if (typeof MutationObserver === 'undefined') return undefined
+        const observer = new MutationObserver(sync)
+        observer.observe(row, { childList: true, subtree: true, characterData: true })
+        return () => {
+          observer.disconnect()
+          if (hidden !== null) hidden.style.display = ''
+        }
+      }, [])
+
+      const commit = async () => {
+        const snapshot = statusRef.current
+        if (snapshot === null || draft === null) return true
+        const displayName = cleanName(draft.displayName)
+        if (displayName.length === 0) {
+          setError(t('The display name cannot be empty', '显示名称不能为空'))
+          return false
+        }
+        if ([...displayName].length > MAX_NAME_LENGTH) {
+          setError(t('Use at most ' + MAX_NAME_LENGTH + ' characters', '最多 ' + MAX_NAME_LENGTH + ' 个字符'))
+          return false
+        }
+        const overrides = { ...(snapshot.modelNames && typeof snapshot.modelNames === 'object' ? snapshot.modelNames : {}) }
+        let renamed = false
+        for (const model of shownModels(snapshot)) {
+          const value = cleanName(draft.names[model.id])
+          const base = cleanName(draft.base.names[model.id])
+          if (value === base) continue
+          if ([...value].length > MAX_NAME_LENGTH) {
+            setError(t('Use at most ' + MAX_NAME_LENGTH + ' characters', '最多 ' + MAX_NAME_LENGTH + ' 个字符'))
+            return false
+          }
+          renamed = true
+          if (value.length === 0) delete overrides[model.id]
+          else overrides[model.id] = value
+        }
+        const patch = {}
+        if (displayName !== cleanName(draft.base.displayName)) patch.displayName = displayName
+        if (renamed) patch.modelNames = overrides
+        if (Object.keys(patch).length === 0) return true
+        setBusy(true)
+        try {
+          const next = await props.client.configure(patch)
+          if (next && typeof next === 'object' && next.error) {
+            setError(String(next.error))
+            return false
+          }
+          if (next && typeof next === 'object') {
+            setStatus(next)
+            setDraft(draftFrom(next))
+          }
+          setError(null)
+          return true
+        } catch (caught) {
+          setError(caught instanceof Error ? caught.message : String(caught))
+          return false
+        } finally {
+          setBusy(false)
+        }
+      }
+      commitRef.current = commit
+
+      const submit = async () => {
+        const ok = await commitRef.current()
+        if (ok) closeRef.current()
+      }
+
+      const seat = (children) => h('div', {
+        ref: seatRef,
+        className: 'dsh-agy-seat',
+        // A seat with nothing to draw must leave the flow entirely: an empty
+        // flex item still costs the card's 12px gap and would jump the row.
+        style: expanded && status !== null && draft !== null ? undefined : { display: 'none' },
+      }, children)
+
+      // Wait for a snapshot before drawing, so the page's own editor keeps the
+      // row until this panel can replace it.
+      if (!expanded || status === null || draft === null) return seat(null)
+
+      return seat(
+        h('div', { className: pc('editor') },
+          h(ProviderHeading, { displayName: draft.displayName || 'Antigravity', route: PROVIDER }),
+          h('details', { className: pc('customized'), open: true },
+            h('summary', { className: pc('customizedSummary') }, t('Custom settings', '自定义设置')),
+            h('div', { className: pc('customizedBody') },
+              h(FieldRow, {
+                label: t('Display name', '显示名称'),
+                value: draft.displayName,
+                placeholder: 'Antigravity',
+                hint: t('Shown in the model picker and the provider row.', '显示在模型菜单和 provider 行。'),
+                disabled: busy,
+                onChange: (next) => setDraft((current) => ({ ...current, displayName: next })),
+              }),
+              h(ModelNameCatalog, {
+                models: shownModels(status),
+                names: draft.names,
+                disabled: busy,
+                onChange: (id, next) => setDraft((current) => ({ ...current, names: { ...current.names, [id]: next } })),
+              }),
+              // The allowlist is this package's own feature, so it is the one
+              // block the page cannot draw: it is handed the page's class
+              // resolver so it renders as part of the same panel.
+              h(MS.ModelSelectionBlock, {
+                adapter: props.adapter,
+                disabled: busy,
+                nativeClass: pc,
+                onStatus: (next) => { if (next && typeof next === 'object') setStatus(next) },
+              }),
+              h('p', { className: pc('advancedHint') },
+                t('Context window, the patch script and the remaining switches stay in cordis.patch.yml.',
+                  '上下文窗口、patch 脚本等其余字段仍由 cordis.patch.yml 管理。')))),
+          error ? h('p', { role: 'alert', className: pc('error') }, error) : null,
+          h('div', { className: pc('editorActions') },
+            h('button', {
+              type: 'button',
+              className: pc('secondaryButton'),
+              disabled: busy,
+              onClick: () => { setError(null); closeRef.current() },
+            }, t('Cancel', '取消')),
+            h('button', {
+              type: 'button',
+              className: pc('primaryButton'),
+              disabled: busy,
+              onClick: () => { void submit() },
+            }, busy ? t('Saving', '保存中') : t('Save', '保存')))))
+    }
+
     /**
      * One editable text row: trims and collapses whitespace, commits on Enter
      * or blur, and leaves the stored value alone when the text is unchanged.
@@ -841,17 +1207,6 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Models the picker currently offers, so the rename rows never list a
-     * family the allowlist hides. Falls back to the full catalog on a host
-     * that reports no visibility flags.
-     */
-    function shownModels(status) {
-      const available = Array.isArray(status.availableModels) ? status.availableModels.filter((m) => m.enabled !== false) : []
-      if (available.length > 0) return available
-      return Array.isArray(status.models) ? status.models : []
-    }
-
-    /**
      * Model directory: one row per advertised model, the id read-only and the
      * display name editable. Clearing a name drops the override and the row
      * falls back to the name the ACP server advertises.
@@ -882,108 +1237,6 @@ window.__ModuleLoader__.load({
               allowEmpty: true,
               onSave: (next) => save(model, next),
             })))))
-    }
-
-    /**
-     * The Models page card's extension seat. The host renders this seat inside
-     * the provider card but OUTSIDE the edit panel and never tells it whether
-     * the row is expanded, so the seat watches its own place in the DOM: the
-     * editor is appended right after it, which makes "something follows me" the
-     * expanded signal. Collapsed renders nothing, so the row matches every
-     * other provider.
-     */
-    function ExpandedOnly(props) {
-      const ref = React.useRef(null)
-      const [observed, setObserved] = React.useState(false)
-      const expanded = props.open === true || observed
-      React.useEffect(() => {
-        const element = ref.current
-        if (!element) return undefined
-        // The host renders the seat inside the row's <li>, and appends the
-        // provider editor to that same <li> only while the row is expanded.
-        // A slot wrapper may sit in between, so watch the whole row.
-        const row = (typeof element.closest === 'function' ? element.closest('li') : null) ?? element.parentElement
-        if (!row) return undefined
-        const sync = () => {
-          if (element.nextElementSibling !== null) {
-            setObserved(true)
-            return
-          }
-          // The host's own editor carries this hint text; it exists only while
-          // the row is expanded, which keeps the check working even if the
-          // editor is nested rather than a direct sibling.
-          const text = typeof row.textContent === 'string' ? row.textContent : ''
-          setObserved(text.indexOf('cordis.patch.yml') >= 0)
-        }
-        sync()
-        if (typeof MutationObserver === 'undefined') return undefined
-        const observer = new MutationObserver(sync)
-        observer.observe(row, { childList: true, subtree: true, characterData: true })
-        return () => observer.disconnect()
-      }, [])
-      return h('div', {
-        ref,
-        className: 'dsh-agy-seat',
-        style: expanded ? undefined : { display: 'none' },
-      }, expanded ? props.children : null)
-    }
-
-    /**
-     * Real editable fields for the Models page card: the host's own editor has
-     * no layout for this provider family and can only point at
-     * cordis.patch.yml, so the names and the allowlist live here instead.
-     */
-    function ModelsCardExtras(props) {
-      // The fields mount only while the host row is expanded, so a collapsed
-      // card costs no status call and renders exactly like every other row.
-      return h(ExpandedOnly, { open: props.open },
-        h(ModelsCardFields, { client: props.client, adapter: props.adapter }))
-    }
-
-    /** The Models page card's editable fields, mounted only while expanded. */
-    function ModelsCardFields(props) {
-      const [status, setStatus] = React.useState(null)
-      const [busy, setBusy] = React.useState(false)
-      const [error, setError] = React.useState(null)
-      React.useEffect(() => {
-        let live = true
-        props.client.statusNow().then((s) => { if (live && s) setStatus(s) }).catch(() => { /* the rows fall back to the stored copy */ })
-        return () => { live = false }
-      }, [props.client])
-      const applyPatch = async (patch) => {
-        setBusy(true)
-        try {
-          const next = await props.client.configure(patch)
-          setStatus(next)
-          setError(next && next.error ? next.error : null)
-        } catch (e) {
-          setError(e instanceof Error ? e.message : String(e))
-        } finally {
-          setBusy(false)
-        }
-      }
-      if (status === null) return null
-      return h('div', { className: 'dsh-agy-seat-body' },
-        h('div', { className: 'dsh-agy-card' },
-          h(TextField, {
-            label: t('Display name', '显示名称'),
-            value: status.displayName || 'Antigravity',
-            placeholder: 'Antigravity',
-            disabled: busy,
-            onSave: (displayName) => void applyPatch({ displayName }),
-          })),
-        h(ModelNameList, {
-          models: shownModels(status),
-          names: status.modelNames || {},
-          busy,
-          onSave: (modelNames) => void applyPatch({ modelNames }),
-        }),
-          h(MS.ModelSelectionBlock, {
-            adapter: props.adapter,
-            disabled: busy,
-            onStatus: (s) => { if (s && typeof s === 'object') setStatus(s) },
-          }),
-          error ? h('div', { role: 'alert', className: 'dsh-agy-field-error' }, error) : null)
     }
 
     const EFFORT_OPTIONS = [
@@ -1314,7 +1567,7 @@ window.__ModuleLoader__.load({
           name: 'settings.models.provider-card',
           key: 'llm-antigravity-acp',
           inject: () => ({ adapter: antigravityModelAdapter(client), client }),
-        }, ModelsCardExtras)), 'antigravity-acp: model catalog card')
+        }, ModelsCardFields)), 'antigravity-acp: model catalog card')
         ctx.inject(['slots', 'modelDirectories'], (scope) => {
           scope.effect(() => scope.slots.inject('conversation.input.model.parameters', () => scope.slots.register({
             name: 'conversation.input.model.parameters',
